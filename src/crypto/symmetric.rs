@@ -3,7 +3,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce as ChaNonce, XChaCha20Poly1305, XNonce,
 };
 
-use crate::base64::base64_decode;
+use crate::utils::base64::base64_decode;
 
 // ── XChaCha20-Poly1305 (24-byte nonce) ────────────────────────────────────────
 //

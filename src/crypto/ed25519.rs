@@ -1,7 +1,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 
-use crate::base64::{base64_decode, base64_encode};
+use crate::utils::base64::{base64_decode, base64_encode};
 
 // ── Ed25519 signing ───────────────────────────────────────────────────────────
 //

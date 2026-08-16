@@ -16,10 +16,10 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::base64::{base64_decode, base64_encode};
-use crate::hex::bytes_to_hex;
+use crate::utils::base64::{base64_decode, base64_encode};
+use crate::utils::hex::bytes_to_hex;
 
-const VECTORS_JSON: &str = include_str!("../tests/fixtures/crypto-vectors.json");
+const VECTORS_JSON: &str = include_str!("../../tests/fixtures/crypto-vectors.json");
 
 #[derive(Deserialize)]
 struct Vectors {
