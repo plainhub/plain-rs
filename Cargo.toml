@@ -1,0 +1,21 @@
+[package]
+name = "plain-rs"
+version = "0.1.0"
+description = "Rust crypto primitives for PlainApp (ECDH P-256, Ed25519, XChaCha20-Poly1305, base64/hex)"
+authors = ["iSmartCoding"]
+edition = "2021"
+rust-version = "1.74"
+
+[lib]
+name = "plain_rs"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "pkcs8", "std"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
