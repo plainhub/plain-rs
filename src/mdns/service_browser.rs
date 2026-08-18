@@ -291,6 +291,12 @@ fn handle_packet(inner: &Inner, data: &[u8]) {
     if !parsed.is_response() {
         return;
     }
+    log::debug!(
+        "mdns browser: rx an={} ar={} types={:?}",
+        parsed.answers.len(),
+        parsed.additional.len(),
+        parsed.all_records().iter().map(|r| r.record_type).collect::<Vec<u16>>()
+    );
 
     let mut touched: HashSet<String> = HashSet::new();
     let mut discovered: Vec<String> = Vec::new(); // instances first seen in this packet
@@ -311,6 +317,7 @@ fn handle_packet(inner: &Inner, data: &[u8]) {
                 }
                 TYPE_SRV => {
                     if let Some(srv) = record.srv() {
+                        log::debug!("mdns browser: SRV {} port={}", record.name, srv.port);
                         if let Some((key, instance)) = find_instance(&state.instances, &record.name)
                         {
                             let mut updated = instance.clone();
