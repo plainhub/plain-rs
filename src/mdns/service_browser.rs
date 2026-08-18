@@ -217,8 +217,10 @@ fn browse_once(inner: &Inner) {
     // the responder keeps packet listeners, so discovery resumes seamlessly.
     host_responder::ensure_started(&inner.mdns_hostname.read().unwrap());
     host_responder::send_query(&packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE));
-    // Follow up on instances that still lack port / metadata / IPs, re-asking
-    // periodically because multicast responses can be dropped.
+    // Re-ask SRV/TXT for EVERY instance on a slow cadence — including
+    // complete ones. PTR responses carry no SRV (see the response builder),
+    // so without this a completed instance's port stays frozen at its first
+    // observed value even after the peer re-binds its server port.
     let now = now_ms();
     struct DueFollowUp {
         key: String,
@@ -232,7 +234,6 @@ fn browse_once(inner: &Inner) {
         state
             .instances
             .values()
-            .filter(|instance| !instance.complete())
             .map(|instance| {
                 let key = instance.instance_fqdn.clone();
                 DueFollowUp {
@@ -550,6 +551,33 @@ mod tests {
         }
         browser.clear_instances();
         assert!(browser.inner.state.lock().unwrap().instances.is_empty());
+    }
+
+    #[test]
+    fn complete_instances_get_srv_txt_refresh_scheduled() {
+        // A completed instance must stay in the follow-up schedule: PTR
+        // responses carry no SRV, so port changes are only learned by
+        // re-querying SRV for already-complete instances.
+        let browser =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
+        {
+            let mut state = browser.inner.state.lock().unwrap();
+            let mut inst = Instance::new("p9._plainapp._tcp.local".to_string(), "p9".to_string());
+            inst.id = "1xvuvk3ujzxyn".to_string();
+            inst.port = 8543;
+            inst.ips.insert("192.168.1.20".to_string());
+            state.instances.insert(inst.instance_fqdn.clone(), inst);
+        }
+        browse_once(&browser.inner);
+        let state = browser.inner.state.lock().unwrap();
+        let queried_at = state
+            .srv_txt_queried_at
+            .get("p9._plainapp._tcp.local")
+            .cloned();
+        assert!(
+            queried_at.is_some_and(|t| t > 0),
+            "complete instance must be scheduled for SRV/TXT refresh"
+        );
     }
 
     #[test]
