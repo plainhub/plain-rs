@@ -201,6 +201,7 @@ impl Worker {
                         std::net::IpAddr::V4(v4) => v4.to_string(),
                         std::net::IpAddr::V6(_) => continue,
                     };
+                    log::debug!("mDNS rx {n} bytes from {sender_ip}");
                     let packet = buf[..n].to_vec();
                     notify_packet_listeners(&packet, &sender_ip);
                     let fresh = candidate_interfaces();
@@ -237,10 +238,11 @@ impl Worker {
                     if err.kind() == io::ErrorKind::WouldBlock
                         || err.kind() == io::ErrorKind::TimedOut => {}
                 Err(err) => {
-                    if !INNER.running.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    log::debug!("mDNS receive error: {err}");
+                    // A non-timeout error means this worker's socket is dead
+                    // (restart_socket tore it down). Exit unconditionally:
+                    // running may already be true again for the NEW worker.
+                    log::debug!("mDNS receive error, stopping worker: {err}");
+                    break;
                 }
             }
             if !INNER.running.load(Ordering::SeqCst) {

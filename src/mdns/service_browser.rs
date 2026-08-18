@@ -285,6 +285,7 @@ fn browse_once(inner: &Inner) {
 
 fn handle_packet(inner: &Inner, data: &[u8]) {
     let Some(parsed) = packet_codec::parse_response(data) else {
+        log::debug!("mdns browser: parse failed ({} bytes)", data.len());
         return;
     };
     if !parsed.is_response() {
@@ -438,6 +439,13 @@ fn handle_packet(inner: &Inner, data: &[u8]) {
     for instance in complete {
         let mut ips: Vec<String> = instance.ips.iter().cloned().collect();
         ips.sort();
+        log::debug!(
+            "mdns browser: complete id={} name={} ips={:?} port={}",
+            instance.id,
+            instance.instance_name,
+            ips,
+            instance.port
+        );
         (inner.on_device)(FoundDevice {
             id: instance.id,
             name: instance.instance_name,
