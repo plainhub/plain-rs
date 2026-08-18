@@ -168,6 +168,24 @@ impl MdnsServiceBrowser {
         host_responder::send_query(&packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE));
     }
 
+    /// Sends SRV + TXT queries for every known instance so one browse() round
+    /// trip refreshes the port of peers whose PTR response carried no SRV
+    /// (RFC 6763 §12 non-compliant peers, or cached PTR announcements).
+    pub fn send_srv_txt_queries(&self) {
+        let names: Vec<String> = {
+            let state = self.inner.state.lock().unwrap();
+            state
+                .instances
+                .values()
+                .map(|i| i.instance_name.clone())
+                .collect()
+        };
+        for name in names {
+            host_responder::send_query(&packet_codec::build_srv_query(&name, PLAINAPP_SERVICE_TYPE));
+            host_responder::send_query(&packet_codec::build_txt_query(&name, PLAINAPP_SERVICE_TYPE));
+        }
+    }
+
     /// Read-only snapshot of every currently-known service instance.
     pub fn snapshot(&self) -> Vec<MdnsServiceSnapshot> {
         let state = self.inner.state.lock().unwrap();
@@ -292,13 +310,6 @@ fn handle_packet(inner: &Inner, data: &[u8]) {
     if !parsed.is_response() {
         return;
     }
-    log::debug!(
-        "mdns browser: rx an={} ar={} types={:?}",
-        parsed.answers.len(),
-        parsed.additional.len(),
-        parsed.all_records().iter().map(|r| r.record_type).collect::<Vec<u16>>()
-    );
-
     let mut touched: HashSet<String> = HashSet::new();
     let mut discovered: Vec<String> = Vec::new(); // instances first seen in this packet
     {
@@ -447,13 +458,6 @@ fn handle_packet(inner: &Inner, data: &[u8]) {
     for instance in complete {
         let mut ips: Vec<String> = instance.ips.iter().cloned().collect();
         ips.sort();
-        log::debug!(
-            "mdns browser: complete id={} name={} ips={:?} port={}",
-            instance.id,
-            instance.instance_name,
-            ips,
-            instance.port
-        );
         (inner.on_device)(FoundDevice {
             id: instance.id,
             name: instance.instance_name,

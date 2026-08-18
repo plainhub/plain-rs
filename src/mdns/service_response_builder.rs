@@ -72,9 +72,26 @@ pub fn build_response_if_match(
     if want_a {
         answers.extend_from_slice(&a_records(service));
     }
-    // A records ride along as additional data for service queries.
-    if (want_ptr || want_srv || want_txt) && !want_a {
+    // RFC 6763 §12: a PTR answer carries SRV/TXT/A in the additional section
+    // so a single PTR query resolves the full service — the port is learned
+    // in one round trip instead of a follow-up SRV query.
+    let mut additional_count = 0usize;
+    if want_ptr {
+        if !want_srv {
+            additional.extend_from_slice(&srv_record(service));
+            additional_count += 1;
+        }
+        if !want_txt {
+            additional.extend_from_slice(&txt_record(service));
+            additional_count += 1;
+        }
+        if !want_a {
+            additional.extend_from_slice(&a_records(service));
+            additional_count += service.ips.len();
+        }
+    } else if (want_srv || want_txt) && !want_a {
         additional.extend_from_slice(&a_records(service));
+        additional_count += service.ips.len();
     }
     if answers.is_empty() {
         return None;
@@ -85,11 +102,6 @@ pub fn build_response_if_match(
         + (want_srv as usize)
         + (want_txt as usize)
         + if want_a { service.ips.len() } else { 0 };
-    let additional_count = if (want_ptr || want_srv || want_txt) && !want_a {
-        service.ips.len()
-    } else {
-        0
-    };
 
     let mut out = Vec::new();
     packet_codec::write_header(&mut out, answer_count, additional_count);
@@ -165,4 +177,42 @@ fn a_records(service: &MdnsServiceInfo) -> Vec<u8> {
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::service_info::{MdnsServiceInfo, PLAINAPP_SERVICE_TYPE};
+    use super::*;
+
+    fn service(port: u16) -> MdnsServiceInfo {
+        MdnsServiceInfo {
+            instance_name: "Pixel 9".to_string(),
+            service_type: PLAINAPP_SERVICE_TYPE.to_string(),
+            target_hostname: "p9.local".to_string(),
+            port,
+            txt_records: vec!["id=abc".to_string()],
+            ips: vec!["192.168.123.23".to_string()],
+        }
+    }
+
+    #[test]
+    fn ptr_response_carries_srv_txt_a_in_additional() {
+        let query = packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE);
+        let resp = build_response_if_match(&query, &service(8443)).expect("response");
+        let parsed = packet_codec::parse_response(&resp.bytes).expect("parse");
+        assert_eq!(parsed.answers.len(), 1);
+        assert_eq!(parsed.additional.len(), 3); // SRV + TXT + A
+        let srv = parsed
+            .additional
+            .iter()
+            .find(|r| r.record_type == TYPE_SRV)
+            .unwrap();
+        assert_eq!(srv.srv().unwrap().port, 8443);
+        let a = parsed
+            .additional
+            .iter()
+            .find(|r| r.record_type == TYPE_A)
+            .unwrap();
+        assert_eq!(a.ip().unwrap(), "192.168.123.23");
+    }
 }

@@ -202,7 +202,6 @@ impl Worker {
                         std::net::IpAddr::V4(v4) => v4.to_string(),
                         std::net::IpAddr::V6(_) => continue,
                     };
-                    log::debug!("mDNS rx {n} bytes from {sender_ip}");
                     let packet = buf[..n].to_vec();
                     notify_packet_listeners(&packet, &sender_ip);
                     let fresh = candidate_interfaces();
