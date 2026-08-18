@@ -155,6 +155,7 @@ pub fn add_packet_listener(listener: PacketListener) {
 /// port 5353 (RFC 6762 §6.7 requires the source port to be 5353).
 pub fn send_query(bytes: &[u8]) {
     let Some(socket) = INNER.socket.read().unwrap().clone() else {
+        log::error!("mDNS sendQuery skipped: no socket (responder not started)");
         return;
     };
     let target = SocketAddrV4::new(MDNS_GROUP, MDNS_PORT);
