@@ -158,7 +158,7 @@ impl MdnsServiceBrowser {
         }
         let inner = self.inner.clone();
         let listener: host_responder::PacketListener =
-            Arc::new(move |data: &[u8], _sender: &str| handle_packet(&inner, data));
+            Arc::new(move |data: &[u8], sender: &str| handle_packet(&inner, data, sender));
         host_responder::add_packet_listener(listener.clone());
         *guard = Some(listener);
     }
@@ -286,7 +286,12 @@ fn browse_once(inner: &Inner) {
     }
 }
 
-fn handle_packet(inner: &Inner, data: &[u8]) {
+fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
+    // Ignore our own looped-back packets so we don't discover ourselves and
+    // re-query our own SRV/TXT records on every discovery cycle.
+    if host_responder::is_local_ip(sender) {
+        return;
+    }
     let Some(parsed) = packet_codec::parse_response(data) else {
         log::debug!("mdns browser: parse failed ({} bytes)", data.len());
         return;
@@ -582,10 +587,73 @@ mod tests {
             &["192.168.1.20".to_string()],
         )
         .expect("a-record response");
-        handle_packet(&browser.inner, &response.bytes);
+        handle_packet(&browser.inner, &response.bytes, "192.0.2.1");
         let state = browser.inner.state.lock().unwrap();
         let inst = state.instances.get(key).expect("instance");
         let ips: Vec<String> = inst.ips.iter().cloned().collect();
         assert_eq!(ips, vec!["192.168.1.20".to_string()]);
+    }
+
+    #[test]
+    fn self_looped_packet_is_ignored() {
+        let response = {
+            let query = packet_codec::build_query("p9.local", TYPE_A, false);
+            packet_codec::build_response_if_match(
+                &query,
+                "p9.local",
+                &["192.168.1.20".to_string()],
+            )
+            .expect("a-record response")
+        };
+        let remote = MdnsServiceBrowser::new(
+            String::new(),
+            Arc::new(RwLock::new(String::new())),
+            |_| {},
+        );
+        let local = MdnsServiceBrowser::new(
+            String::new(),
+            Arc::new(RwLock::new(String::new())),
+            |_| {},
+        );
+        let seed = |browser: &MdnsServiceBrowser| {
+            let key = "p9._plainapp._tcp.local";
+            let mut state = browser.inner.state.lock().unwrap();
+            let mut inst = Instance::new(key.to_string(), "p9".to_string());
+            inst.port = 8443;
+            inst.ips.insert("192.168.1.10".to_string());
+            state.instances.insert(key.to_string(), inst);
+            state
+                .hostname_to_instance
+                .insert("p9.local".to_string(), key.to_string());
+        };
+        seed(&remote);
+        seed(&local);
+
+        handle_packet(&remote.inner, &response.bytes, "192.0.2.1");
+        assert!(remote
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .instances
+            .values()
+            .all(|i| i.ips.contains(&"192.168.1.20".to_string())));
+
+        if let Some(ip) = local_ip_sender() {
+            handle_packet(&local.inner, &response.bytes, &ip);
+            assert!(local
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .instances
+                .values()
+                .all(|i| i.ips.contains(&"192.168.1.10".to_string())
+                    && !i.ips.contains(&"192.168.1.20".to_string())));
+        }
+    }
+
+    fn local_ip_sender() -> Option<String> {
+        super::host_responder::local_ipv4_strs().into_iter().next()
     }
 }

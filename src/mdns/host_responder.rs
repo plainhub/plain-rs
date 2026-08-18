@@ -204,6 +204,11 @@ impl Worker {
                     };
                     let packet = buf[..n].to_vec();
                     notify_packet_listeners(&packet, &sender_ip);
+                    // Our own multicast packets loop back to this socket;
+                    // answering them doubles traffic on every discovery cycle.
+                    if is_local_ip(&sender_ip) {
+                        continue;
+                    }
                     let fresh = candidate_interfaces();
                     if fresh.is_empty() {
                         continue;
@@ -350,6 +355,14 @@ pub fn local_ipv4_strs() -> Vec<String> {
         .collect()
 }
 
+/// Whether `ip` is one of this host's own IPv4 addresses. Used to ignore
+/// multicast loop-back of our own queries/announcements (RFC 6762 §5.2).
+pub fn is_local_ip(ip: &str) -> bool {
+    candidate_interfaces()
+        .into_iter()
+        .any(|iface| iface.ip.to_string() == ip)
+}
+
 /// Picks the first candidate IP that shares a subnet with a local interface,
 /// falling back to the first entry.
 pub fn get_best_ip(ips: &[String]) -> String {
@@ -399,5 +412,16 @@ mod tests {
         assert_eq!(iface.name, "en0");
         assert_eq!(ip, "192.168.1.5");
         assert!(find_response_iface("10.0.0.1", &candidates).is_none());
+    }
+
+    #[test]
+    fn is_local_ip_recognizes_candidate_addresses() {
+        let locals = local_ipv4_strs();
+        for ip in &locals {
+            assert!(is_local_ip(ip), "{ip} should be local");
+        }
+        // A fabricated external address is never local.
+        assert!(!is_local_ip("192.0.2.1"));
+        assert!(!is_local_ip(""));
     }
 }
