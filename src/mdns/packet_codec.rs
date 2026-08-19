@@ -113,6 +113,7 @@ pub fn parse_response(data: &[u8]) -> Option<MdnsParsedResponse> {
     let flags = read_u16(data, 2);
     let qd_count = read_u16(data, 4) as usize;
     let an_count = read_u16(data, 6) as usize;
+    let ns_count = read_u16(data, 8) as usize;
     let ar_count = read_u16(data, 10) as usize;
 
     let mut offset = 12usize;
@@ -124,6 +125,7 @@ pub fn parse_response(data: &[u8]) -> Option<MdnsParsedResponse> {
         }
     }
     let (answers, offset) = read_records(data, offset, an_count)?;
+    let (_authority, offset) = read_records(data, offset, ns_count)?;
     let (additional, _) = read_records(data, offset, ar_count)?;
     Some(MdnsParsedResponse {
         flags,
@@ -297,4 +299,50 @@ pub fn ip_to_bytes(ip: &str) -> Vec<u8> {
     ip.split('.')
         .filter_map(|part| part.parse::<u8>().ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_response_skips_authority_section() {
+        let mut out = Vec::new();
+        write_u16(&mut out, 0);
+        write_u16(&mut out, DNS_RESPONSE_FLAGS);
+        write_u16(&mut out, 0);
+        write_u16(&mut out, 1);
+        write_u16(&mut out, 1);
+        write_u16(&mut out, 1);
+        write_record(
+            &mut out,
+            &encode_name("_plainapp._tcp.local"),
+            TYPE_PTR,
+            DNS_CLASS_IN,
+            TTL_SECONDS,
+            &encode_name("X._plainapp._tcp.local"),
+        );
+        write_record(
+            &mut out,
+            &encode_name("junk.local"),
+            TYPE_A,
+            DNS_CLASS_IN,
+            TTL_SECONDS,
+            &[1, 2, 3, 4],
+        );
+        write_record(
+            &mut out,
+            &encode_name("p9.local"),
+            TYPE_A,
+            DNS_CACHE_FLUSH_CLASS_IN,
+            TTL_SECONDS,
+            &[192, 168, 1, 20],
+        );
+
+        let parsed = parse_response(&out).expect("parse");
+        assert_eq!(parsed.answers.len(), 1);
+        assert_eq!(parsed.additional.len(), 1);
+        assert_eq!(parsed.additional[0].name, "p9.local");
+        assert_eq!(parsed.additional[0].ip().unwrap(), "192.168.1.20");
+    }
 }
