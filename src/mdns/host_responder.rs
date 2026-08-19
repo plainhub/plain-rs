@@ -1,22 +1,31 @@
 //! Lightweight mDNS responder — single receive socket, standards-aware reply.
 //!
+//! Mirrors plain-app's Kotlin `MdnsHostResponder` (see `docs/mdns.md`): the
+//! three bring-up resilience mechanisms are kept in lock-step with that code
+//! so both platforms behave identically.
+//!
 //! RECEIVE: One socket bound to 0.0.0.0:5353 joins 224.0.0.251 on every valid
-//! LAN interface.
+//! LAN interface. Network changes reuse the socket and only join missing
+//! interfaces; transient create/bind/join failures retry with exponential
+//! backoff.
 //!
 //! SEND: Replies are sent via the same socket so the source port is always
 //! 5353. RFC 6762 §6.7 requires this — resolvers silently discard mDNS
 //! responses whose source port ≠ 5353. QU/legacy-unicast queries are answered
-//! directly; ordinary multicast queries are answered to 224.0.0.251:5353.
+//! directly; ordinary multicast queries are answered to 224.0.0.251:5353. The
+//! full service info is broadcast when the socket comes up and re-broadcast
+//! every 60s so neighbors whose caches expired still find us.
 
-use super::packet_codec::{self, MdnsResponse};
-use super::service_info::MdnsServiceInfo;
+use super::packet_codec::{self, MdnsResponse, TYPE_A};
+use super::service_info::{MdnsServiceInfo, PLAINAPP_SERVICE_TYPE};
 use super::service_response_builder;
 use if_addrs::{IfAddr, Interface};
+use std::collections::HashSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock, RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -24,6 +33,14 @@ const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const RECEIVE_TIMEOUT_MS: u64 = 1_000;
 const RECV_BUF_SIZE: usize = 1500;
+
+/// How often to re-broadcast the service so neighbors whose cache expired
+/// (multicast responses get lost) still find us: every 60s, < the 120s TTL.
+const REANNOUNCE_MS: u64 = 60_000;
+
+/// Exponential backoff for transient bring-up failures (create/bind/join).
+const INITIAL_RETRY_MS: u64 = 2_000;
+const MAX_RETRY_MS: u64 = 32_000;
 
 pub type PacketListener = Arc<dyn Fn(&[u8], &str) + Send + Sync>;
 
@@ -50,6 +67,20 @@ static SAW_EXTERNAL_MULTICAST: AtomicBool = AtomicBool::new(false);
 /// Dedicated QU query socket (ephemeral port), lazily created.
 static QU_SOCKET: RwLock<Option<Arc<std::net::UdpSocket>>> = RwLock::new(None);
 
+/// Interface names the current socket has joined the group on (`None` = the
+/// socket was torn down / nothing joined yet).
+fn joined_ifaces() -> &'static std::sync::Mutex<Option<HashSet<String>>> {
+    static JOINED: OnceLock<std::sync::Mutex<Option<HashSet<String>>>> = OnceLock::new();
+    JOINED.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Delay for the next retry attempt; advanced on each failure, reset on start.
+static RETRY_DELAY_MS: AtomicU64 = AtomicU64::new(INITIAL_RETRY_MS);
+/// True while a retry attempt is scheduled (prevents stacking retry threads).
+static RETRY_PENDING: AtomicBool = AtomicBool::new(false);
+/// Marshals the single periodic re-announce thread.
+static REANNOUNCE_STARTED: AtomicBool = AtomicBool::new(false);
+
 /// Takes (reads and resets) the external-multicast-seen flag. The browser
 /// polls this every scan cycle: no external multicast means the receive path
 /// is dead (e.g. a router dropping cross-band multicast) and QU queries must
@@ -73,6 +104,7 @@ pub fn start(mdns_hostname: &str, service: Option<MdnsServiceInfo>) -> bool {
     }
     *INNER.hostname.write().unwrap() = normalized;
     *INNER.service_info.write().unwrap() = service;
+    RETRY_DELAY_MS.store(INITIAL_RETRY_MS, Ordering::SeqCst);
     restart_socket()
 }
 
@@ -86,14 +118,15 @@ pub fn ensure_started(mdns_hostname: &str) -> bool {
     start(mdns_hostname, service)
 }
 
-/// Recreates the socket after a network change, preserving hostname/service
-/// config. mDNS multicast group membership is per-interface; when the device
-/// switches networks the new interface was never joined, so the old socket
-/// stops receiving multicast until it is recreated.
+/// Brings the responder up for the current network. Reuses the already-bound
+/// socket when one exists, only joining interfaces that are missing — so a
+/// network change does not tear down and rebuild (no dropped membership, no
+/// churn). The socket is rebuilt only when it does not exist yet. Mirrors the
+/// Kotlin `MdnsHostResponder.restartSocket`.
 pub fn restart_socket() -> bool {
-    tear_down_socket();
     let hostname = INNER.hostname.read().unwrap().clone();
     if hostname.is_empty() {
+        log::error!("mDNS restart skipped: hostname not configured");
         return false;
     }
 
@@ -103,58 +136,192 @@ pub fn restart_socket() -> bool {
         return false;
     }
 
-    let socket = match create_mdns_socket() {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("mDNS socket create failed: {e}");
-            return false;
+    // Reuse the live socket when present so a network change does not rebuild
+    // it (no dropped membership, no churn); rebuild when missing or the worker
+    // died (mirrors Kotlin's `existing.isClosed`).
+    let existing = INNER.socket.read().unwrap().clone();
+    let is_new = !(existing.is_some() && INNER.running.load(Ordering::SeqCst));
+    let socket = if !is_new {
+        existing.expect("checked alive")
+    } else {
+        match create_and_bind_socket() {
+            Ok(s) => {
+                let socket = Arc::new(s);
+                if let Some(old) = INNER.socket.write().unwrap().replace(socket.clone()) {
+                    let _ = old.leave_multicast_v4(&MDNS_GROUP, &Ipv4Addr::UNSPECIFIED);
+                }
+                INNER.running.store(true, Ordering::SeqCst);
+                let worker = Worker {
+                    socket: socket.clone(),
+                };
+                std::thread::Builder::new()
+                    .name("plain-mdns-responder".to_string())
+                    .spawn(move || worker.run_loop())
+                    .expect("spawn mdns responder");
+                *joined_ifaces().lock().unwrap() = None;
+                socket
+            }
+            Err(e) => {
+                log::error!("mDNS create/bind failed: {e}");
+                schedule_retry();
+                return false;
+            }
         }
     };
 
-    if let Err(e) = socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT).into()) {
-        let _ = std::net::UdpSocket::from(socket);
-        log::error!("mDNS bind/join failed: {e}");
-        return false;
+    let ok = sync_memberships(&socket, &candidates);
+    if !ok && is_new {
+        schedule_retry();
     }
-    let socket: std::net::UdpSocket = socket.into();
-    let socket = Arc::new(socket);
-    let mut joined = false;
-    for iface in &candidates {
-        match socket.join_multicast_v4(&MDNS_GROUP, &iface.ip) {
-            Ok(()) => {
-                joined = true;
-                log::debug!("mDNS joined {}", iface.name);
+    log::info!(
+        "mDNS listener up hostname={hostname} interfaces={:?}",
+        joined_iface_list()
+    );
+    broadcast_service();
+    ensure_reannounce();
+    ok
+}
+
+/// Reuses the socket and joins the group only on interfaces that are missing,
+/// keeping existing memberships so the socket is never rebuilt on an
+/// interface-only change. Falls back to a plain (interface-less) join only
+/// when no per-interface join works. Mirrors Kotlin `syncMemberships`.
+fn sync_memberships(socket: &std::net::UdpSocket, candidates: &[MdnsIface]) -> bool {
+    let desired: HashSet<String> = candidates.iter().map(|i| i.name.clone()).collect();
+    let joined = joined_iface_set();
+    let to_join = interfaces_to_join(&desired, &joined);
+    let mut fresh = HashSet::new();
+    for name in to_join {
+        if let Some(iface) = candidates.iter().find(|i| i.name == name) {
+            match socket.join_multicast_v4(&MDNS_GROUP, &iface.ip) {
+                Ok(()) => {
+                    fresh.insert(name.clone());
+                    log::debug!("mDNS joined {}", name);
+                }
+                Err(e) => log::error!("mDNS joinGroup {name}: {e}"),
             }
-            Err(e) => log::error!("mDNS joinGroup {}: {e}", iface.name),
         }
     }
-    if !joined {
+    let success: HashSet<String> = desired.intersection(&joined).cloned().chain(fresh).collect();
+    *joined_ifaces().lock().unwrap() = Some(success.clone());
+    if success.is_empty() {
+        // All per-interface joins failed (EINVAL on some kernels) — fall back
+        // to the default interface so single-NIC devices still work.
         match socket.join_multicast_v4(&MDNS_GROUP, &Ipv4Addr::UNSPECIFIED) {
             Ok(()) => log::debug!("mDNS joined (default)"),
             Err(e) => log::error!("mDNS joinGroup default: {e}"),
         }
     }
-
-    *INNER.socket.write().unwrap() = Some(socket.clone());
-    INNER.running.store(true, Ordering::SeqCst);
-    let worker = Worker { socket };
-    std::thread::Builder::new()
-        .name("plain-mdns-responder".to_string())
-        .spawn(move || worker.run_loop())
-        .expect("spawn mdns responder");
-    log::info!(
-        "mDNS socket + receive worker started for {hostname} on {} interface(s)",
-        candidates.len()
-    );
-    true
+    !success.is_empty()
 }
 
-fn tear_down_socket() {
-    INNER.running.store(false, Ordering::SeqCst);
-    let s = INNER.socket.write().unwrap().take();
-    if let Some(s) = s {
-        let _ = s.leave_multicast_v4(&MDNS_GROUP, &Ipv4Addr::UNSPECIFIED);
-        // Drop closes the socket; the worker's recv times out and exits.
+/// Interface names that are desired but not yet joined — pure, unit-tested.
+/// Mirrors Kotlin `MdnsHostResponder.interfacesToJoin`.
+fn interfaces_to_join(desired: &HashSet<String>, joined: &HashSet<String>) -> HashSet<String> {
+    desired.difference(joined).cloned().collect()
+}
+
+/// Next backoff delay after an unsuccessful attempt — pure, unit-tested.
+/// Mirrors Kotlin `MdnsHostResponder.nextRetryDelay`.
+fn next_retry_delay(current: u64) -> u64 {
+    current.saturating_mul(2).min(MAX_RETRY_MS)
+}
+
+/// Reschedules a bring-up attempt with exponential backoff (2s → 4s → … → 32s).
+/// At most one retry is pending at a time. Because [restart_socket] reuses a
+/// live socket, a stale retry that fires after a successful bring-up is
+/// idempotent (it just re-joins and re-announces), so no cancellation is needed.
+fn schedule_retry() {
+    if RETRY_PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let delay = RETRY_DELAY_MS.load(Ordering::SeqCst);
+    std::thread::Builder::new()
+        .name("plain-mdns-retry".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay));
+            RETRY_PENDING.store(false, Ordering::SeqCst);
+            RETRY_DELAY_MS.store(next_retry_delay(delay), Ordering::SeqCst);
+            restart_socket();
+        })
+        .ok();
+}
+
+/// Starts the periodic re-announcer (singleton). Broadcasts the full service
+/// info every 60s so neighbors whose cache expired (multicast responses are
+/// lossy) still discover us without waiting for their own query. Mirrors the
+/// Kotlin `ensureReannounceJob`.
+fn ensure_reannounce() {
+    if REANNOUNCE_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("plain-mdns-announce".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(REANNOUNCE_MS));
+            if INNER.service_info.read().unwrap().is_some() {
+                broadcast_service();
+            }
+        })
+        .ok();
+}
+
+/// Sends a gratuitous mDNS announcement (RFC 6762 §8.3): the full service info
+/// when a service is published, else the hostname A record. Mirrors the Kotlin
+/// `MdnsHostResponder.broadcastService`.
+fn broadcast_service() {
+    let Some(socket) = INNER.socket.read().unwrap().clone() else {
+        return;
+    };
+    let candidates = candidate_interfaces();
+    if candidates.is_empty() {
+        return;
+    }
+    let ips: Vec<String> = candidates
+        .iter()
+        .map(|i| i.ip.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ips.is_empty() {
+        return;
+    }
+
+    let bytes: Option<Vec<u8>> = {
+        let service = INNER.service_info.read().unwrap().clone();
+        match service {
+            Some(mut s) => {
+                s.ips = ips;
+                service_response_builder::build_response_if_match(
+                    &packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE),
+                    &s,
+                )
+                .map(|r| r.bytes)
+            }
+            None => {
+                let hostname = INNER.hostname.read().unwrap().clone();
+                packet_codec::build_response_if_match(
+                    &packet_codec::build_query(&hostname, TYPE_A, false),
+                    &hostname,
+                    &ips,
+                )
+                .map(|r| r.bytes)
+            }
+        }
+    };
+    let Some(bytes) = bytes else {
+        return;
+    };
+
+    let target = SocketAddrV4::new(MDNS_GROUP, MDNS_PORT);
+    log::info!(
+        "mDNS announce -> {MDNS_GROUP}:{MDNS_PORT} on {} iface(s)",
+        candidates.len()
+    );
+    for iface in &candidates {
+        let _ = socket2::SockRef::from(&*socket).set_multicast_if_v4(&iface.ip);
+        if let Err(e) = socket.send_to(&bytes, target) {
+            log::error!("mDNS announce {}: {e}", iface.name);
+        }
     }
 }
 
@@ -333,10 +500,19 @@ impl Worker {
                     if err.kind() == io::ErrorKind::WouldBlock
                         || err.kind() == io::ErrorKind::TimedOut => {}
                 Err(err) => {
-                    // A non-timeout error means this worker's socket is dead
-                    // (restart_socket tore it down). Exit unconditionally:
-                    // running may already be true again for the NEW worker.
+                    // A non-timeout error means this worker's socket is dead.
+                    // Clear running ONLY if this worker still owns the current
+                    // socket — a stale worker from a rebuild must not flip the
+                    // flag for the newer one. This lets a future restart_socket
+                    // detect the dead socket (mirrors Kotlin's `isClosed`).
                     log::debug!("mDNS receive error, stopping worker: {err}");
+                    let still_current = matches!(
+                        INNER.socket.read().unwrap().as_ref(),
+                        Some(cur) if Arc::ptr_eq(&self.socket, cur)
+                    );
+                    if still_current {
+                        INNER.running.store(false, Ordering::SeqCst);
+                    }
                     break;
                 }
             }
@@ -376,7 +552,7 @@ pub fn normalize_hostname(value: &str) -> String {
     }
 }
 
-fn create_mdns_socket() -> io::Result<socket2::Socket> {
+fn create_and_bind_socket() -> io::Result<std::net::UdpSocket> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -387,7 +563,8 @@ fn create_mdns_socket() -> io::Result<socket2::Socket> {
     socket.set_reuse_port(true)?;
     socket.set_multicast_ttl_v4(1)?;
     socket.set_multicast_loop_v4(true)?;
-    Ok(socket)
+    socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT).into())?;
+    Ok(socket.into())
 }
 
 /// LAN interfaces with their IPv4 address, used for group join + subnet match.
@@ -471,9 +648,27 @@ pub fn get_best_ip(ips: &[String]) -> String {
     }
 }
 
+fn joined_iface_set() -> HashSet<String> {
+    joined_ifaces()
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default()
+}
+
+fn joined_iface_list() -> Vec<String> {
+    let mut names: Vec<String> = joined_iface_set().into_iter().collect();
+    names.sort();
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set(from: &[&str]) -> HashSet<String> {
+        from.iter().map(|s| s.to_string()).collect()
+    }
 
     #[test]
     fn normalize_hostname_appends_local() {
@@ -513,5 +708,48 @@ mod tests {
         // A fabricated external address is never local.
         assert!(!is_local_ip("192.0.2.1"));
         assert!(!is_local_ip(""));
+    }
+
+    // ── interfaces_to_join (incremental multicast membership) ──────────────
+    #[test]
+    fn nothing_joined_yet_all_desired_interfaces_need_joining() {
+        let got = interfaces_to_join(&set(&["wlan0", "ap0"]), &set(&[]));
+        assert_eq!(got, set(&["wlan0", "ap0"]));
+    }
+
+    #[test]
+    fn partially_joined_only_the_missing_ones_are_returned() {
+        let got = interfaces_to_join(&set(&["wlan0", "ap0"]), &set(&["wlan0"]));
+        assert_eq!(got, set(&["ap0"]));
+    }
+
+    #[test]
+    fn fully_joined_nothing_to_join() {
+        let got = interfaces_to_join(&set(&["wlan0", "ap0"]), &set(&["wlan0", "ap0"]));
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn stale_joined_interfaces_not_in_desired_are_ignored() {
+        let got = interfaces_to_join(&set(&["wlan0"]), &set(&["tun0"]));
+        assert_eq!(got, set(&["wlan0"]));
+    }
+
+    // ── next_retry_delay (exponential backoff) ────────────────────────────
+    #[test]
+    fn backoff_doubles() {
+        assert_eq!(next_retry_delay(2_000), 4_000);
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        assert_eq!(next_retry_delay(8_000), 16_000);
+        assert_eq!(next_retry_delay(16_000), 32_000);
+    }
+
+    #[test]
+    fn backoff_never_exceeds_the_cap() {
+        assert_eq!(next_retry_delay(32_000), 32_000);
+        assert_eq!(next_retry_delay(std::u64::MAX), 32_000);
     }
 }
