@@ -15,7 +15,7 @@ use super::service_info::PLAINAPP_SERVICE_TYPE;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, Mutex, RwLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +23,10 @@ const DISCOVER_INTERVAL_MS: u64 = 5_000;
 /// Re-query an incomplete instance at most this often (multicast responses
 /// get lost).
 const FOLLOW_UP_RETRY_MS: u64 = 10_000;
+/// Switch to QU (unicast-response) queries after this many scan cycles with
+/// zero external multicast packets — broken routers silently drop cross-band
+/// multicast while unicast still flows.
+const QU_FALLBACK_AFTER_CYCLES: u64 = 2;
 
 /// A complete service instance handed to the discovery consumer. TXT values
 /// stay strings — mapping `dv` to a typed enum is the caller's business.
@@ -90,6 +94,8 @@ struct Inner {
     client_id: String,
     mdns_hostname: Arc<RwLock<String>>,
     on_device: Box<dyn Fn(FoundDevice) + Send + Sync>,
+    qu_active: AtomicBool,
+    browse_cycles: AtomicU64,
 }
 
 /// mDNS service browser. Created once and cloned cheaply (all state behind an
@@ -114,6 +120,8 @@ impl MdnsServiceBrowser {
                 client_id,
                 mdns_hostname,
                 on_device: Box::new(on_device),
+                qu_active: AtomicBool::new(false),
+                browse_cycles: AtomicU64::new(0),
             }),
         }
     }
@@ -165,7 +173,7 @@ impl MdnsServiceBrowser {
 
     /// One-shot PTR query used by directed re-discovery of a paired peer.
     pub fn send_ptr_query(&self) {
-        host_responder::send_query(&packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE));
+        dispatch_query(&self.inner, PLAINAPP_SERVICE_TYPE, TYPE_PTR);
     }
 
 
@@ -214,10 +222,21 @@ pub struct MdnsServiceSnapshot {
 }
 
 fn browse_once(inner: &Inner) {
+    let cycle = inner.browse_cycles.fetch_add(1, Ordering::SeqCst) + 1;
+    // QU fallback: sticky. Once activated it stays on — QU also works on
+    // healthy networks (peers answer unicast), so switching back buys
+    // nothing and would re-break discovery on flaky multicast.
+    if !inner.qu_active.load(Ordering::SeqCst)
+        && cycle >= QU_FALLBACK_AFTER_CYCLES
+        && !host_responder::take_external_multicast_seen()
+    {
+        inner.qu_active.store(true, Ordering::SeqCst);
+        log::info!("mdns browser: no external multicast, switching to QU queries");
+    }
     // Self-heal after an external socket teardown (e.g. HTTP service stop):
     // the responder keeps packet listeners, so discovery resumes seamlessly.
     host_responder::ensure_started(&inner.mdns_hostname.read().unwrap());
-    host_responder::send_query(&packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE));
+    dispatch_query(inner, PLAINAPP_SERVICE_TYPE, TYPE_PTR);
     // Follow up on instances that still lack port / metadata / IPs, re-asking
     // periodically because multicast responses can be dropped. Completed
     // instances refresh from every PTR announcement, which carries SRV/TXT/A
@@ -268,21 +287,32 @@ fn browse_once(inner: &Inner) {
         (srv_txt_names, a_hostnames)
     };
     for hostname in a_hostnames {
-        host_responder::send_query(&packet_codec::build_query(&hostname, TYPE_A, false));
+        dispatch_query(inner, &hostname, TYPE_A);
     }
     for instance_name in srv_txt_names {
-        // build_srv_query/build_txt_query append the service type
-        // themselves — pass the SHORT instance name, NOT the full FQDN
-        // (double-suffixed query names never match the responder's
-        // instanceFqdn).
-        host_responder::send_query(&packet_codec::build_srv_query(
-            &instance_name,
-            PLAINAPP_SERVICE_TYPE,
-        ));
-        host_responder::send_query(&packet_codec::build_txt_query(
-            &instance_name,
-            PLAINAPP_SERVICE_TYPE,
-        ));
+        dispatch_query(
+            inner,
+            &format!("{instance_name}.{PLAINAPP_SERVICE_TYPE}"),
+            TYPE_SRV,
+        );
+        dispatch_query(
+            inner,
+            &format!("{instance_name}.{PLAINAPP_SERVICE_TYPE}"),
+            TYPE_TXT,
+        );
+    }
+}
+
+/// Routes a query through the QU socket once multicast responses have proven
+/// unreachable; unicast responses then arrive on the QU socket and reach
+/// `handle_packet` through the shared packet listeners.
+fn dispatch_query(inner: &Inner, name: &str, qtype: u16) {
+    let qu = inner.qu_active.load(Ordering::SeqCst);
+    let bytes = packet_codec::build_query(name, qtype, qu);
+    if qu {
+        host_responder::send_qu_query(&bytes);
+    } else {
+        host_responder::send_query(&bytes);
     }
 }
 
@@ -408,14 +438,16 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
             .collect()
     };
     for instance_name in queries {
-        host_responder::send_query(&packet_codec::build_srv_query(
-            &instance_name,
-            PLAINAPP_SERVICE_TYPE,
-        ));
-        host_responder::send_query(&packet_codec::build_txt_query(
-            &instance_name,
-            PLAINAPP_SERVICE_TYPE,
-        ));
+        dispatch_query(
+            inner,
+            &format!("{instance_name}.{PLAINAPP_SERVICE_TYPE}"),
+            TYPE_SRV,
+        );
+        dispatch_query(
+            inner,
+            &format!("{instance_name}.{PLAINAPP_SERVICE_TYPE}"),
+            TYPE_TXT,
+        );
     }
 
     let complete: Vec<Instance> = {

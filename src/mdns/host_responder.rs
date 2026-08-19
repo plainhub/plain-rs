@@ -43,6 +43,21 @@ static INNER: Inner = Inner {
     listeners: RwLock::new(Vec::new()),
 };
 
+/// Whether any external (non-local) packet reached the shared multicast
+/// socket since the last `take_external_multicast_seen` call.
+static SAW_EXTERNAL_MULTICAST: AtomicBool = AtomicBool::new(false);
+
+/// Dedicated QU query socket (ephemeral port), lazily created.
+static QU_SOCKET: RwLock<Option<Arc<std::net::UdpSocket>>> = RwLock::new(None);
+
+/// Takes (reads and resets) the external-multicast-seen flag. The browser
+/// polls this every scan cycle: no external multicast means the receive path
+/// is dead (e.g. a router dropping cross-band multicast) and QU queries must
+/// take over.
+pub fn take_external_multicast_seen() -> bool {
+    SAW_EXTERNAL_MULTICAST.swap(false, Ordering::Relaxed)
+}
+
 pub fn is_running() -> bool {
     INNER.running.load(Ordering::SeqCst) && INNER.socket.read().unwrap().is_some()
 }
@@ -158,6 +173,22 @@ pub fn send_query(bytes: &[u8]) {
         log::error!("mDNS sendQuery skipped: no socket (responder not started)");
         return;
     };
+    send_to_group(&socket, bytes);
+}
+
+/// Sends a QU (unicast-response requested, RFC 6762 §5.4) query through a
+/// dedicated ephemeral-port socket. Broken routers drop cross-band multicast
+/// while unicast still flows; the unicast responses then come back to this
+/// exact socket — a 5353-bound socket could lose them to another
+/// SO_REUSEPORT peer on the same machine.
+pub fn send_qu_query(bytes: &[u8]) {
+    let Some(socket) = ensure_qu_socket() else {
+        return;
+    };
+    send_to_group(&socket, bytes);
+}
+
+fn send_to_group(socket: &std::net::UdpSocket, bytes: &[u8]) {
     let target = SocketAddrV4::new(MDNS_GROUP, MDNS_PORT);
     let candidates = candidate_interfaces();
     if candidates.is_empty() {
@@ -171,11 +202,64 @@ pub fn send_query(bytes: &[u8]) {
     // candidate silently drops the query when that interface is not where the
     // peers live (e.g. Ethernet/VM bridge enumerated before Wi-Fi).
     for iface in candidates {
-        let _ = socket2::SockRef::from(&*socket).set_multicast_if_v4(&iface.ip);
+        let _ = socket2::SockRef::from(socket).set_multicast_if_v4(&iface.ip);
         if let Err(e) = socket.send_to(bytes, target) {
             log::error!("mDNS sendQuery {}: {e}", iface.name);
         }
     }
+}
+
+fn ensure_qu_socket() -> Option<Arc<std::net::UdpSocket>> {
+    if let Some(socket) = QU_SOCKET.read().unwrap().clone() {
+        return Some(socket);
+    }
+    let mut guard = QU_SOCKET.write().unwrap();
+    if let Some(socket) = guard.clone() {
+        return Some(socket);
+    }
+    let socket = match create_qu_socket() {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            log::error!("mDNS QU socket create failed: {e}");
+            return None;
+        }
+    };
+    *guard = Some(socket.clone());
+    let reader = socket.clone();
+    std::thread::Builder::new()
+        .name("plain-mdns-qu-reader".to_string())
+        .spawn(move || qu_receive_loop(&reader))
+        .expect("spawn mdns qu reader");
+    Some(socket)
+}
+
+fn qu_receive_loop(socket: &std::net::UdpSocket) {
+    let mut buf = [0u8; RECV_BUF_SIZE];
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((n, src)) => {
+                if let std::net::IpAddr::V4(v4) = src.ip() {
+                    notify_packet_listeners(&buf[..n], &v4.to_string());
+                }
+            }
+            Err(err) => {
+                log::debug!("mDNS QU receive error, stopping: {err}");
+                break;
+            }
+        }
+    }
+}
+
+fn create_qu_socket() -> io::Result<std::net::UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_multicast_ttl_v4(1)?;
+    socket.set_multicast_loop_v4(false)?;
+    socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into())?;
+    Ok(socket.into())
 }
 
 fn notify_packet_listeners(bytes: &[u8], sender_ip: &str) {
@@ -203,10 +287,16 @@ impl Worker {
                         std::net::IpAddr::V6(_) => continue,
                     };
                     let packet = buf[..n].to_vec();
+                    let local = is_local_ip(&sender_ip);
+                    // Any external packet proves the multicast receive path
+                    // works; the browser polls this for QU fallback.
+                    if !local {
+                        SAW_EXTERNAL_MULTICAST.store(true, Ordering::Relaxed);
+                    }
                     notify_packet_listeners(&packet, &sender_ip);
                     // Our own multicast packets loop back to this socket;
                     // answering them doubles traffic on every discovery cycle.
-                    if is_local_ip(&sender_ip) {
+                    if local {
                         continue;
                     }
                     let fresh = candidate_interfaces();
