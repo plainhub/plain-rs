@@ -331,9 +331,48 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
     }
     let mut touched: HashSet<String> = HashSet::new();
     let mut discovered: Vec<String> = Vec::new(); // instances first seen in this packet
+    // RFC 6762 §8.4 goodbye: TTL=0 records withdraw an instance — a peer
+    // that renamed itself republishes under a new instance FQDN. Cached
+    // entries never expire here, so without dropping the withdrawn one the
+    // old name would be listed forever (next to the new one). Online status
+    // is deliberately left untouched: the same id is re-announced under the
+    // new name moments later, so clearing it would only flicker the UI.
+    let all = parsed.all_records();
+    let goodbye = goodbye_instance_keys(&all);
+    // Withdrawn records must not be merged back in: find_instance recreates
+    // a bare Instance for any name it does not know.
+    let records: Vec<&super::service_info::MdnsRecord> = if goodbye.is_empty() {
+        all
+    } else {
+        all.into_iter().filter(|r| r.ttl != 0).collect()
+    };
+    // Group this packet's A records by hostname first: a multi-homed host
+    // (e.g. Wi-Fi + VPN) announces several addresses for the SAME hostname in
+    // one packet and the whole set is authoritative — replacing per record
+    // would keep only the last one (typically the VPN address).
+    let a_by_hostname: HashMap<String, HashSet<String>> = {
+        let mut grouped: HashMap<String, HashSet<String>> = HashMap::new();
+        for record in &records {
+            if record.record_type == TYPE_A {
+                if let Some(ip) = record.ip() {
+                    grouped
+                        .entry(record.name.to_lowercase())
+                        .or_default()
+                        .insert(ip);
+                }
+            }
+        }
+        grouped
+    };
     {
         let mut state = inner.state.lock().unwrap();
-        for record in parsed.all_records() {
+        if !goodbye.is_empty() {
+            for key in &goodbye {
+                state.instances.remove(key);
+            }
+            state.hostname_to_instance.retain(|_, v| !goodbye.contains(v));
+        }
+        for record in &records {
             match record.record_type {
                 TYPE_PTR => {
                     if let Some(target) = record.ptr_target() {
@@ -391,27 +430,31 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
                         }
                     }
                 }
-                TYPE_A => {
-                    if let Some(ip) = record.ip() {
-                        let key = state
-                            .hostname_to_instance
-                            .get(&record.name.to_lowercase())
-                            .cloned();
-                        if let Some(key) = key {
-                            if let Some(instance) = state.instances.get_mut(&key) {
-                                // An A record is authoritative for the target
-                                // hostname's CURRENT address. Replace, don't
-                                // accumulate — otherwise a device that changed
-                                // IPs keeps its stale address in the set, which
-                                // sorts first and targets the dead IP forever.
-                                instance.ips.clear();
-                                instance.ips.insert(ip);
-                                touched.insert(key);
-                            }
-                        }
-                    }
-                }
                 _ => {}
+            }
+        }
+        // The packet's A-record set is authoritative for the hostname's
+        // CURRENT addresses. Applied once per packet, after SRV records may
+        // have registered the hostname mapping: a host that moved networks
+        // replaces the set (stale IP dropped), while a single packet carrying
+        // several interface addresses keeps them all.
+        for (hostname, ips) in a_by_hostname {
+            if let Some(key) = state.hostname_to_instance.get(&hostname).cloned() {
+                if let Some(instance) = state.instances.get_mut(&key) {
+                    if instance.ips != ips {
+                        instance.ips = ips;
+                    }
+                    touched.insert(key);
+                }
+            }
+        }
+        // Drop the withdrawn instances' follow-up query timestamps too, so a
+        // later republish under the same FQDN is re-resolved without waiting
+        // out FOLLOW_UP_RETRY_MS.
+        if !goodbye.is_empty() {
+            for key in &goodbye {
+                state.srv_txt_queried_at.remove(key);
+                state.a_queried_at.remove(key);
             }
         }
     }
@@ -491,28 +534,61 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
     }
 }
 
+/// Instances withdrawn by one packet's TTL=0 (goodbye) records, keyed like
+/// the `instances` map. A PTR goodbye carries the instance in its rdata,
+/// SRV/TXT in the record name. A records are hostname-scoped, so they never
+/// withdraw an instance. Mirrors the Kotlin
+/// `MdnsServiceBrowser.goodbyeInstanceKeys`.
+fn goodbye_instance_keys(records: &[&super::service_info::MdnsRecord]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for record in records {
+        if record.ttl != 0 {
+            continue;
+        }
+        let fqdn = match record.record_type {
+            TYPE_PTR => record.ptr_target(),
+            TYPE_SRV | TYPE_TXT => Some(record.name.clone()),
+            _ => None,
+        };
+        if let Some(key) = fqdn.as_deref().and_then(instance_key_of) {
+            keys.insert(key);
+        }
+    }
+    keys
+}
+
 /// Resolves `name` against `current`; None when it is not one of our service
 /// instances. Returns the key plus the existing or a fresh instance.
 fn find_instance(
     current: &HashMap<String, Instance>,
     name: &str,
 ) -> Option<(String, Instance)> {
-    if !name
+    let key = instance_key_of(name)?;
+    let instance_name_len = name.len().saturating_sub(PLAINAPP_SERVICE_TYPE.len() + 1);
+    let instance_name = name[..instance_name_len].to_string();
+    Some((
+        key.clone(),
+        current
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Instance::new(key, instance_name)),
+    ))
+}
+
+/// `fqdn` as an instance key (lowercased) when it names one of our service
+/// instances. Mirrors the Kotlin `MdnsServiceBrowser.instanceKeyOf`.
+fn instance_key_of(fqdn: &str) -> Option<String> {
+    if !fqdn
         .to_lowercase()
         .ends_with(&PLAINAPP_SERVICE_TYPE.to_lowercase())
     {
         return None;
     }
-    let key = name.to_lowercase();
-    let instance_name_len = name.len().saturating_sub(PLAINAPP_SERVICE_TYPE.len() + 1);
-    let instance_name = name[..instance_name_len].to_string();
-    if instance_name.is_empty() {
+    let instance_name_len = fqdn.len().saturating_sub(PLAINAPP_SERVICE_TYPE.len() + 1);
+    if instance_name_len == 0 {
         return None;
     }
-    Some((
-        key.clone(),
-        current.get(&key).cloned().unwrap_or_else(|| Instance::new(key, instance_name)),
-    ))
+    Some(fqdn.to_lowercase())
 }
 
 fn now_ms() -> u64 {
@@ -624,6 +700,143 @@ mod tests {
         let inst = state.instances.get(key).expect("instance");
         let ips: Vec<String> = inst.ips.iter().cloned().collect();
         assert_eq!(ips, vec!["192.168.1.20".to_string()]);
+    }
+
+    #[test]
+    fn multi_a_records_in_one_packet_keep_all_interface_ips() {
+        let browser =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
+        let key = "p9._plainapp._tcp.local";
+        {
+            let mut state = browser.inner.state.lock().unwrap();
+            let mut inst = Instance::new(key.to_string(), "p9".to_string());
+            inst.id = "1xvuvk3ujzxyn".to_string();
+            inst.target_hostname = "p9.local".to_string();
+            inst.port = 8443;
+            inst.ips.insert("192.168.1.10".to_string());
+            state.instances.insert(key.to_string(), inst);
+            state
+                .hostname_to_instance
+                .insert("p9.local".to_string(), key.to_string());
+        }
+        // A multi-homed host (Wi-Fi + VPN) answers with BOTH addresses in one
+        // packet — the set is authoritative, so both are kept instead of the
+        // last record (the VPN address) winning.
+        let query = super::packet_codec::build_query("p9.local", TYPE_A, false);
+        let response = super::packet_codec::build_response_if_match(
+            &query,
+            "p9.local",
+            &["192.168.1.10".to_string(), "10.8.0.2".to_string()],
+        )
+        .expect("a-record response");
+        handle_packet(&browser.inner, &response.bytes, "192.0.2.1");
+        let state = browser.inner.state.lock().unwrap();
+        let inst = state.instances.get(key).expect("instance");
+        let mut ips: Vec<String> = inst.ips.iter().cloned().collect();
+        ips.sort();
+        assert_eq!(ips, vec!["10.8.0.2".to_string(), "192.168.1.10".to_string()]);
+    }
+
+    // ── goodbye_instance_keys (RFC 6762 §8.4) ─────────────────────────────
+    // A renamed peer withdraws its old instance with a TTL=0 packet; the
+    // browser must drop that instance instead of listing the old name forever.
+
+    use super::super::service_info::{MdnsServiceInfo, PLAINAPP_SERVICE_TYPE as SERVICE_TYPE};
+    use super::super::service_response_builder;
+
+    fn test_service(instance_name: &str, service_type: &str) -> MdnsServiceInfo {
+        MdnsServiceInfo {
+            instance_name: instance_name.to_string(),
+            service_type: service_type.to_string(),
+            target_hostname: "plainapp-abc.local".to_string(),
+            port: 8443,
+            txt_records: vec!["id=abc".to_string()],
+            ips: vec!["192.168.1.50".to_string()],
+        }
+    }
+
+    fn goodbye_keys(bytes: &[u8]) -> HashSet<String> {
+        let parsed = packet_codec::parse_response(bytes).expect("parse");
+        goodbye_instance_keys(&parsed.all_records())
+    }
+    #[test]
+    fn goodbye_packet_withdraws_the_renamed_instance() {
+        let browser =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
+        let key = "pixel 7 pro._plainapp._tcp.local";
+        {
+            let mut state = browser.inner.state.lock().unwrap();
+            state.instances.insert(
+                key.to_string(),
+                Instance::new(key.to_string(), "Pixel 7 Pro".to_string()),
+            );
+            state
+                .hostname_to_instance
+                .insert("plainapp-abc.local".to_string(), key.to_string());
+            state.srv_txt_queried_at.insert(key.to_string(), 42);
+        }
+        let goodbye = service_response_builder::build_goodbye(&test_service(
+            "Pixel 7 Pro",
+            SERVICE_TYPE,
+        ));
+        handle_packet(&browser.inner, &goodbye, "192.0.2.1");
+        let state = browser.inner.state.lock().unwrap();
+        assert!(!state.instances.contains_key(key));
+        assert!(!state.hostname_to_instance.contains_key("plainapp-abc.local"));
+        assert!(!state.srv_txt_queried_at.contains_key(key));
+    }
+
+    #[test]
+    fn records_with_a_live_ttl_are_not_a_goodbye() {
+        let query = packet_codec::build_ptr_query(SERVICE_TYPE);
+        let response = service_response_builder::build_response_if_match(
+            &query,
+            &test_service("Pixel 7 Pro", SERVICE_TYPE),
+        )
+        .expect("response");
+        assert!(goodbye_keys(&response.bytes).is_empty());
+    }
+
+    #[test]
+    fn goodbye_for_another_service_type_is_ignored() {
+        let other = test_service("Speaker", "_airplay._tcp.local");
+        let goodbye = service_response_builder::build_goodbye(&other);
+        assert!(goodbye_keys(&goodbye).is_empty());
+    }
+
+    #[test]
+    fn zero_ttl_a_record_does_not_withdraw_an_instance() {
+        // Build a goodbye-shaped packet, then swap the SRV/TXT records for a
+        // TTL=0 A record: hostname-scoped records never withdraw an instance.
+        let browser =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
+        let key = "p9._plainapp._tcp.local";
+        {
+            let mut state = browser.inner.state.lock().unwrap();
+            state.instances.insert(
+                key.to_string(),
+                Instance::new(key.to_string(), "p9".to_string()),
+            );
+        }
+        // A zero-TTL A record for the instance's target hostname.
+        let mut out = Vec::new();
+        packet_codec::write_header(&mut out, 1, 0);
+        packet_codec::write_record(
+            &mut out,
+            &packet_codec::encode_name("p9.local"),
+            TYPE_A,
+            packet_codec::DNS_CACHE_FLUSH_CLASS_IN,
+            0,
+            &packet_codec::ip_to_bytes("192.168.1.10"),
+        );
+        handle_packet(&browser.inner, &out, "192.0.2.1");
+        assert!(browser
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .instances
+            .contains_key(key));
     }
 
     #[test]

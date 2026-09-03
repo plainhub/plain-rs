@@ -118,6 +118,67 @@ pub fn ensure_started(mdns_hostname: &str) -> bool {
     start(mdns_hostname, service)
 }
 
+/// Replaces the published service and re-announces it right away instead of
+/// waiting for the next REANNOUNCE_MS cycle. Used when the advertised data
+/// changed while the service stays up (e.g. the device was renamed).
+///
+/// A different instance FQDN makes the old instance's records stale in every
+/// peer cache, so the previous instance is withdrawn first with an RFC 6762
+/// §8.4 goodbye (TTL=0); peers then list only the new name.
+///
+/// No-op when nothing is published: with the HTTP service off the responder
+/// only answers hostname queries, and republishing would advertise a dead
+/// service. Returns false when the responder socket is down — the new service
+/// is stored either way and goes out with the next
+/// `start`/`restart_socket`. Mirrors the Kotlin `MdnsHostResponder.updateService`.
+pub fn update_service(service: MdnsServiceInfo) -> bool {
+    let fqdn = service.instance_fqdn();
+    let previous = {
+        let mut guard = INNER.service_info.write().unwrap();
+        match guard.clone() {
+            None => return false,
+            Some(prev) => {
+                *guard = Some(service);
+                prev
+            }
+        }
+    };
+    if !is_running() {
+        log::info!("mDNS updateService: responder down, stored {fqdn}");
+        return false;
+    }
+    if !previous.instance_fqdn().eq_ignore_ascii_case(&fqdn) {
+        send_goodbye(&previous);
+    }
+    broadcast_service();
+    true
+}
+
+/// Sends the TTL=0 goodbye for `previous` on every LAN interface. Mirrors the
+/// Kotlin `MdnsHostResponder.sendGoodbye`.
+fn send_goodbye(previous: &MdnsServiceInfo) {
+    let Some(socket) = INNER.socket.read().unwrap().clone() else {
+        return;
+    };
+    let candidates = candidate_interfaces();
+    if candidates.is_empty() {
+        return;
+    }
+    let bytes = service_response_builder::build_goodbye(previous);
+    let target = SocketAddrV4::new(MDNS_GROUP, MDNS_PORT);
+    log::info!(
+        "mDNS goodbye {} -> {MDNS_GROUP}:{MDNS_PORT} on {} iface(s)",
+        previous.instance_fqdn(),
+        candidates.len()
+    );
+    for iface in &candidates {
+        let _ = socket2::SockRef::from(&*socket).set_multicast_if_v4(&iface.ip);
+        if let Err(e) = socket.send_to(&bytes, target) {
+            log::error!("mDNS goodbye {}: {e}", iface.name);
+        }
+    }
+}
+
 /// Brings the responder up for the current network. Reuses the already-bound
 /// socket when one exists, only joining interfaces that are missing — so a
 /// network change does not tear down and rebuild (no dropped membership, no
@@ -267,8 +328,11 @@ fn ensure_reannounce() {
 }
 
 /// Sends a gratuitous mDNS announcement (RFC 6762 §8.3): the full service info
-/// when a service is published, else the hostname A record. Mirrors the Kotlin
-/// `MdnsHostResponder.broadcastService`.
+/// when a service is published, else the hostname A record. Each copy carries
+/// ONLY its outgoing interface's address — announcing every interface's IP in
+/// one packet makes peers whose browsers replace the A-record set per record
+/// latch onto the wrong (e.g. VPN) address. Mirrors the Kotlin
+/// `MdnsHostResponder.broadcastService` + `buildAnnouncement`.
 fn broadcast_service() {
     let Some(socket) = INNER.socket.read().unwrap().clone() else {
         return;
@@ -277,40 +341,8 @@ fn broadcast_service() {
     if candidates.is_empty() {
         return;
     }
-    let ips: Vec<String> = candidates
-        .iter()
-        .map(|i| i.ip.to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if ips.is_empty() {
-        return;
-    }
-
-    let bytes: Option<Vec<u8>> = {
-        let service = INNER.service_info.read().unwrap().clone();
-        match service {
-            Some(mut s) => {
-                s.ips = ips;
-                service_response_builder::build_response_if_match(
-                    &packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE),
-                    &s,
-                )
-                .map(|r| r.bytes)
-            }
-            None => {
-                let hostname = INNER.hostname.read().unwrap().clone();
-                packet_codec::build_response_if_match(
-                    &packet_codec::build_query(&hostname, TYPE_A, false),
-                    &hostname,
-                    &ips,
-                )
-                .map(|r| r.bytes)
-            }
-        }
-    };
-    let Some(bytes) = bytes else {
-        return;
-    };
+    let service = INNER.service_info.read().unwrap().clone();
+    let hostname = INNER.hostname.read().unwrap().clone();
 
     let target = SocketAddrV4::new(MDNS_GROUP, MDNS_PORT);
     log::info!(
@@ -318,6 +350,26 @@ fn broadcast_service() {
         candidates.len()
     );
     for iface in &candidates {
+        let ip = iface.ip.to_string();
+        let bytes: Option<Vec<u8>> = match service.clone() {
+            Some(mut s) => {
+                s.ips = vec![ip];
+                service_response_builder::build_response_if_match(
+                    &packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE),
+                    &s,
+                )
+                .map(|r| r.bytes)
+            }
+            None => packet_codec::build_response_if_match(
+                &packet_codec::build_query(&hostname, TYPE_A, false),
+                &hostname,
+                &[ip],
+            )
+            .map(|r| r.bytes),
+        };
+        let Some(bytes) = bytes else {
+            continue;
+        };
         let _ = socket2::SockRef::from(&*socket).set_multicast_if_v4(&iface.ip);
         if let Err(e) = socket.send_to(&bytes, target) {
             log::error!("mDNS announce {}: {e}", iface.name);

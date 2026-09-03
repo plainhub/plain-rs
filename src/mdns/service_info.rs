@@ -34,6 +34,9 @@ pub struct MdnsSrvRecord {
 pub struct MdnsRecord {
     pub name: String,
     pub record_type: u16,
+    /// Record TTL in seconds; 0 means the record is being withdrawn
+    /// (RFC 6762 §8.4 goodbye).
+    pub ttl: u32,
     pub packet: Vec<u8>,
     pub rdata_start: usize,
     pub rdata_length: usize,

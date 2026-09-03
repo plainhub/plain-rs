@@ -144,6 +144,7 @@ fn read_records(data: &[u8], start: usize, count: usize) -> Option<(Vec<MdnsReco
             return None;
         }
         let record_type = read_u16(data, offset);
+        let ttl = read_u32(data, offset + 4);
         let rdlen = read_u16(data, offset + 8) as usize;
         offset += 10;
         if offset + rdlen > data.len() {
@@ -152,6 +153,7 @@ fn read_records(data: &[u8], start: usize, count: usize) -> Option<(Vec<MdnsReco
         records.push(MdnsRecord {
             name,
             record_type,
+            ttl,
             packet: data.to_vec(),
             rdata_start: offset,
             rdata_length: rdlen,

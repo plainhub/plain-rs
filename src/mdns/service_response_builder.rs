@@ -61,13 +61,13 @@ pub fn build_response_if_match(
     let mut answers: Vec<u8> = Vec::new();
     let mut additional: Vec<u8> = Vec::new();
     if want_ptr {
-        answers.extend_from_slice(&ptr_record(service));
+        answers.extend_from_slice(&ptr_record(service, TTL_SECONDS));
     }
     if want_srv {
-        answers.extend_from_slice(&srv_record(service));
+        answers.extend_from_slice(&srv_record(service, TTL_SECONDS));
     }
     if want_txt {
-        answers.extend_from_slice(&txt_record(service));
+        answers.extend_from_slice(&txt_record(service, TTL_SECONDS));
     }
     if want_a {
         answers.extend_from_slice(&a_records(service));
@@ -78,11 +78,11 @@ pub fn build_response_if_match(
     let mut additional_count = 0usize;
     if want_ptr {
         if !want_srv {
-            additional.extend_from_slice(&srv_record(service));
+            additional.extend_from_slice(&srv_record(service, TTL_SECONDS));
             additional_count += 1;
         }
         if !want_txt {
-            additional.extend_from_slice(&txt_record(service));
+            additional.extend_from_slice(&txt_record(service, TTL_SECONDS));
             additional_count += 1;
         }
         if !want_a {
@@ -110,7 +110,7 @@ pub fn build_response_if_match(
     Some(MdnsServiceResponse { bytes: out })
 }
 
-fn ptr_record(service: &MdnsServiceInfo) -> Vec<u8> {
+fn ptr_record(service: &MdnsServiceInfo, ttl: u32) -> Vec<u8> {
     let mut out = Vec::new();
     packet_codec::write_record(
         &mut out,
@@ -120,13 +120,13 @@ fn ptr_record(service: &MdnsServiceInfo) -> Vec<u8> {
         // (SRV/TXT/A). PTR rnames are shared by all instances of the type,
         // so flushing would evict other devices' PTR entries from peers.
         DNS_CLASS_IN,
-        TTL_SECONDS,
+        ttl,
         &packet_codec::encode_name(&service.instance_fqdn()),
     );
     out
 }
 
-fn srv_record(service: &MdnsServiceInfo) -> Vec<u8> {
+fn srv_record(service: &MdnsServiceInfo, ttl: u32) -> Vec<u8> {
     let mut rdata = Vec::new();
     packet_codec::write_u16(&mut rdata, 0); // priority
     packet_codec::write_u16(&mut rdata, 0); // weight
@@ -138,13 +138,13 @@ fn srv_record(service: &MdnsServiceInfo) -> Vec<u8> {
         &packet_codec::encode_name(&service.instance_fqdn()),
         TYPE_SRV,
         DNS_CACHE_FLUSH_CLASS_IN,
-        TTL_SECONDS,
+        ttl,
         &rdata,
     );
     out
 }
 
-fn txt_record(service: &MdnsServiceInfo) -> Vec<u8> {
+fn txt_record(service: &MdnsServiceInfo, ttl: u32) -> Vec<u8> {
     let mut rdata = Vec::new();
     for value in &service.txt_records {
         let bytes = value.as_bytes();
@@ -157,9 +157,24 @@ fn txt_record(service: &MdnsServiceInfo) -> Vec<u8> {
         &packet_codec::encode_name(&service.instance_fqdn()),
         TYPE_TXT,
         DNS_CACHE_FLUSH_CLASS_IN,
-        TTL_SECONDS,
+        ttl,
         &rdata,
     );
+    out
+}
+
+/// Builds the RFC 6762 §8.4 goodbye for one instance: the same PTR/SRV/TXT
+/// records with TTL=0, so every resolver on the link drops the cached entry
+/// at once. Needed when a published instance is replaced by one with a
+/// different instance FQDN (device renamed) — without it peers keep listing
+/// the old name until the 120s TTL expires. Mirrors the Kotlin
+/// `MdnsServiceResponseBuilder.buildGoodbye`.
+pub fn build_goodbye(service: &MdnsServiceInfo) -> Vec<u8> {
+    let mut out = Vec::new();
+    packet_codec::write_header(&mut out, 3, 0);
+    out.extend_from_slice(&ptr_record(service, 0));
+    out.extend_from_slice(&srv_record(service, 0));
+    out.extend_from_slice(&txt_record(service, 0));
     out
 }
 
@@ -214,5 +229,36 @@ mod tests {
             .find(|r| r.record_type == TYPE_A)
             .unwrap();
         assert_eq!(a.ip().unwrap(), "192.168.123.23");
+    }
+
+    // ── Goodbye (RFC 6762 §8.4) ─────────────────────────────────────────────
+    // Sent when a published instance is replaced by one with a different
+    // instance FQDN (device renamed): TTL=0 makes peers drop the stale records
+    // at once instead of listing the old name until the 120s TTL expires.
+
+    #[test]
+    fn goodbye_carries_ptr_srv_txt_with_zero_ttl() {
+        let parsed =
+            packet_codec::parse_response(&build_goodbye(&service(8443))).expect("parse");
+        assert!(parsed.is_response());
+        let types: Vec<u16> = parsed.answers.iter().map(|r| r.record_type).collect();
+        assert_eq!(types, vec![TYPE_PTR, TYPE_SRV, TYPE_TXT]);
+        for record in &parsed.answers {
+            assert_eq!(record.ttl, 0);
+        }
+        assert_eq!(
+            parsed.answers[0].ptr_target().unwrap(),
+            service(8443).instance_fqdn()
+        );
+    }
+
+    #[test]
+    fn live_records_parse_with_the_configured_ttl() {
+        let query = packet_codec::build_ptr_query(PLAINAPP_SERVICE_TYPE);
+        let resp = build_response_if_match(&query, &service(8443)).expect("response");
+        let parsed = packet_codec::parse_response(&resp.bytes).expect("parse");
+        for record in parsed.all_records() {
+            assert_eq!(record.ttl, TTL_SECONDS);
+        }
     }
 }
