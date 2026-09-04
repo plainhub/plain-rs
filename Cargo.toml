@@ -1,7 +1,7 @@
 [package]
 name = "plain-rs"
 version = "0.1.0"
-description = "Shared Rust primitives for PlainApp: crypto (ECDH P-256, Ed25519, XChaCha20-Poly1305) and utils (base64, hex, mime, query, http, short_uuid)"
+description = "Shared Rust primitives for the Plain* projects: crypto (ECDH P-256, Ed25519, XChaCha20-Poly1305) and utils (base64, hex, mime, query, http, http_url, short_uuid, shortid, hostname, ifaddr, async_read_stream, hash)"
 authors = ["iSmartCoding"]
 edition = "2021"
 rust-version = "1.74"
@@ -20,6 +20,18 @@ log = "0.4"
 if-addrs = "0.13"
 socket2 = { version = "0.5", features = ["all"] }
 serde = { version = "1", features = ["derive"] }
+# Platform FFI for hostname(2) / getifaddrs(3) — libc is already a transitive
+# dependency of the ecosystem crates, listing it explicitly for direct use.
+libc = "0.2"
+# AsyncReadStream: AsyncRead -> Stream adapter (bytes is the canonical
+# byte type both axum and tokio re-export).
+bytes = "1"
+futures-core = "0.3"
+# AsyncReadStream needs the AsyncRead trait + ReadBuf (io-util is the
+# minimal feature set that provides them; no runtime/net).
+tokio = { version = "1", default-features = false, features = ["io-util"] }
 
 [dev-dependencies]
 serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
