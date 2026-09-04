@@ -7,10 +7,14 @@
 //! `if-addrs` crate internally; this module is the shared primitive for
 //! everything else.
 //!
-//! We call `libc` directly: `getifaddrs` is glibc-/musl-libc-level —
-//! present everywhere these projects run.
+//! The Unix implementation calls `getifaddrs(3)` via `libc`. That is a
+//! POSIX API with no Windows equivalent in `libc`, so on non-Unix
+//! targets `list()` logs a warning and returns an empty `Vec` — call
+//! sites must tolerate an empty list anyway (no network is legal).
 
 use std::net::Ipv4Addr;
+
+#[cfg(unix)]
 use std::ptr::NonNull;
 
 /// One IPv4 interface entry. `netmask` is `None` if the kernel reported
@@ -24,6 +28,7 @@ pub struct Ifv4 {
 /// Walk the kernel's interface list, returning every up, non-loopback
 /// IPv4 interface. Errors are logged (and an empty `Vec` is returned)
 /// so the call site stays panic-free.
+#[cfg(unix)]
 pub fn list() -> Vec<Ifv4> {
     let mut out = Vec::new();
     let mut raw: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -68,6 +73,12 @@ pub fn list() -> Vec<Ifv4> {
     // SAFETY: matches the `getifaddrs` above.
     unsafe { libc::freeifaddrs(raw) };
     out
+}
+
+#[cfg(not(unix))]
+pub fn list() -> Vec<Ifv4> {
+    log::warn!("[ifaddr] getifaddrs(3) is unavailable on this platform");
+    Vec::new()
 }
 
 #[cfg(test)]
