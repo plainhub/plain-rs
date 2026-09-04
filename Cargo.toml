@@ -20,6 +20,10 @@ log = "0.4"
 if-addrs = "0.13"
 socket2 = { version = "0.5", features = ["all"] }
 serde = { version = "1", features = ["derive"] }
+# Self-signed TLS cert generation for the local HTTPS servers
+# (plain-desktop local/tls.rs, plain-nas cmd/run.rs). ring backend to
+# match the consumers' rustls stacks.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 # Platform FFI for hostname(2) / getifaddrs(3) — libc is already a transitive
 # dependency of the ecosystem crates, listing it explicitly for direct use.
 libc = "0.2"
