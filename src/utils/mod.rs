@@ -11,3 +11,4 @@ pub mod hostname;
 pub mod ifaddr;
 pub mod async_read_stream;
 pub mod hash;
+pub mod unique_path;

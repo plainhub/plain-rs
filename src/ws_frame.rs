@@ -52,6 +52,7 @@ pub fn decode_with_token(frame: &[u8], token_b64: &str) -> Option<(i32, Vec<u8>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::base64::base64_encode;
 
     #[test]
     fn round_trip_raw_key() {
