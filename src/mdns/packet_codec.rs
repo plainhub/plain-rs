@@ -10,6 +10,7 @@ use super::service_info::{MdnsParsedResponse, MdnsRecord};
 
 pub const DNS_CLASS_IN: u16 = 0x0001;
 pub const TYPE_A: u16 = 0x0001;
+pub const TYPE_AAAA: u16 = 0x001C;
 pub const TYPE_PTR: u16 = 0x000C;
 pub const TYPE_TXT: u16 = 0x0010;
 pub const TYPE_SRV: u16 = 0x0021;
@@ -298,9 +299,50 @@ pub fn write_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 pub fn ip_to_bytes(ip: &str) -> Vec<u8> {
-    ip.split('.')
-        .filter_map(|part| part.parse::<u8>().ok())
-        .collect()
+    ip.split('.').filter_map(|part| part.parse::<u8>().ok()).collect()
+}
+
+/// Formats 16 raw bytes of AAAA RDATA as standard IPv6 text, compressing the
+/// longest run of zero hextets with "::" (RFC 5952).
+pub fn ipv6_to_string(bytes: &[u8]) -> Option<String> {
+    if bytes.len() != 16 {
+        return None;
+    }
+    let hextets: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| ((c[0] as u16) << 8) | c[1] as u16)
+        .collect();
+    let mut best: Option<(usize, usize)> = None; // (start, len) of longest zero run
+    let mut i = 0;
+    while i < hextets.len() {
+        if hextets[i] == 0 {
+            let start = i;
+            while i < hextets.len() && hextets[i] == 0 {
+                i += 1;
+            }
+            let len = i - start;
+            if best.map_or(true, |(_, bl)| len > bl) {
+                best = Some((start, len));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let fmt = |r: &[u16]| r.iter().map(|h| format!("{h:x}")).collect::<Vec<_>>().join(":");
+    match best {
+        Some((s, l)) if l >= 2 => {
+            let e = s + l;
+            let left = &hextets[..s];
+            let right = &hextets[e..];
+            Some(match (left.is_empty(), right.is_empty()) {
+                (true, true) => "::".to_string(),
+                (true, false) => format!("::{}", fmt(right)),
+                (false, true) => format!("{}::", fmt(left)),
+                (false, false) => format!("{}::{}", fmt(left), fmt(right)),
+            })
+        }
+        _ => Some(fmt(&hextets)),
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +388,23 @@ mod tests {
         assert_eq!(parsed.additional.len(), 1);
         assert_eq!(parsed.additional[0].name, "p9.local");
         assert_eq!(parsed.additional[0].ip().unwrap(), "192.168.1.20");
+    }
+
+    #[test]
+    fn ipv6_to_string_compresses_longest_zero_run() {
+        let v = |vals: &[u16]| {
+            let mut b = Vec::new();
+            for x in vals {
+                b.push((x >> 8) as u8);
+                b.push((x & 0xFF) as u8);
+            }
+            ipv6_to_string(&b).expect("ipv6")
+        };
+        assert_eq!(v(&[0xfe80,0,0,0,0,0xcc7,0x94ea,0xcb1]), "fe80::cc7:94ea:cb1");
+        assert_eq!(v(&[0x2001,0xdb8,0,0,0,0,0,1]), "2001:db8::1");
+        assert_eq!(v(&[0,0,0,0,0,0,0,1]), "::1");
+        assert_eq!(v(&[1,2,3,4,5,6,7,8]), "1:2:3:4:5:6:7:8");
+        assert!(ipv6_to_string(&[1,2,3,4]).is_none());
     }
 
     #[test]

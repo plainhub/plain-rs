@@ -22,7 +22,7 @@ use super::service_response_builder;
 use if_addrs::{IfAddr, Interface};
 use std::collections::HashSet;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::sync::{
     Arc, OnceLock, RwLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -30,6 +30,7 @@ use std::sync::{
 use std::time::Duration;
 
 const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MDNS_GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
 const MDNS_PORT: u16 = 5353;
 const RECEIVE_TIMEOUT_MS: u64 = 1_000;
 const RECV_BUF_SIZE: usize = 1500;
@@ -66,6 +67,13 @@ static SAW_EXTERNAL_MULTICAST: AtomicBool = AtomicBool::new(false);
 
 /// Dedicated QU query socket (ephemeral port), lazily created.
 static QU_SOCKET: RwLock<Option<Arc<std::net::UdpSocket>>> = RwLock::new(None);
+
+/// IPv6 mDNS receive socket: bound to [::]:5353, joined to `ff02::fb` so the
+/// browser hears devices that announce over IPv6 link-local multicast when
+/// they do not answer IPv4 multicast (e.g. behind an IPv4-inert LAN). Receive
+/// and query-only; answers still go out the IPv4 socket on the shared port.
+static IPV6_SOCKET: RwLock<Option<Arc<std::net::UdpSocket>>> = RwLock::new(None);
+static IPV6_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Interface names the current socket has joined the group on (`None` = the
 /// socket was torn down / nothing joined yet).
@@ -105,7 +113,9 @@ pub fn start(mdns_hostname: &str, service: Option<MdnsServiceInfo>) -> bool {
     *INNER.hostname.write().unwrap() = normalized;
     *INNER.service_info.write().unwrap() = service;
     RETRY_DELAY_MS.store(INITIAL_RETRY_MS, Ordering::SeqCst);
-    restart_socket()
+    let ok = restart_socket();
+    ensure_ipv6_started();
+    ok
 }
 
 /// Ensures the responder socket is up so discovery works even while the HTTP
@@ -388,11 +398,39 @@ pub fn add_packet_listener(listener: PacketListener) {
 /// Sends an mDNS query through the shared socket so responses come back on
 /// port 5353 (RFC 6762 §6.7 requires the source port to be 5353).
 pub fn send_query(bytes: &[u8]) {
-    let Some(socket) = INNER.socket.read().unwrap().clone() else {
-        log::error!("mDNS sendQuery skipped: no socket (responder not started)");
+    if let Some(socket) = INNER.socket.read().unwrap().clone() {
+        send_to_group(&socket, bytes);
+    }
+    send_ipv6_query(bytes);
+}
+
+/// Sends a query directly to a known peer's `ip:5353` (RFC 6762 §5.5 direct
+/// unicast requery) — the discovery fallback for networks that silently drop
+/// multicast (VPN / AP isolation) while unicast still flows. The QU bit in the
+/// packet asks the peer to answer via unicast, which arrives on the shared
+/// receive loops like any multicast reply.
+pub fn send_unicast_query(bytes: &[u8], ip: &str) {
+    if let Ok(v4) = ip.parse::<Ipv4Addr>() {
+        // Through the ephemeral QU socket: a unicast reply addressed to
+        // :5353 could be delivered to another SO_REUSEPORT peer on this
+        // machine (e.g. the system mDNSResponder), while a reply to the
+        // ephemeral source port always comes back to this exact socket
+        // (RFC 6762 §6.7 legacy-unicast path).
+        if let Some(socket) = ensure_qu_socket() {
+            if let Err(e) = socket.send_to(bytes, SocketAddrV4::new(v4, MDNS_PORT)) {
+                log::error!("mDNS unicast query to {ip}: {e}");
+            }
+        }
         return;
-    };
-    send_to_group(&socket, bytes);
+    }
+    if let Ok(v6) = ip.parse::<Ipv6Addr>() {
+        let Some(socket) = IPV6_SOCKET.read().unwrap().clone() else {
+            return;
+        };
+        if let Err(e) = socket.send_to(bytes, SocketAddrV6::new(v6, MDNS_PORT, 0, 0)) {
+            log::error!("mDNS unicast query to {ip}: {e}");
+        }
+    }
 }
 
 /// Sends a QU (unicast-response requested, RFC 6762 §5.4) query through a
@@ -401,10 +439,10 @@ pub fn send_query(bytes: &[u8]) {
 /// exact socket — a 5353-bound socket could lose them to another
 /// SO_REUSEPORT peer on the same machine.
 pub fn send_qu_query(bytes: &[u8]) {
-    let Some(socket) = ensure_qu_socket() else {
-        return;
-    };
-    send_to_group(&socket, bytes);
+    if let Some(socket) = ensure_qu_socket() {
+        send_to_group(&socket, bytes);
+    }
+    send_ipv6_query(bytes);
 }
 
 fn send_to_group(socket: &std::net::UdpSocket, bytes: &[u8]) {
@@ -424,6 +462,185 @@ fn send_to_group(socket: &std::net::UdpSocket, bytes: &[u8]) {
         let _ = socket2::SockRef::from(socket).set_multicast_if_v4(&iface.ip);
         if let Err(e) = socket.send_to(bytes, target) {
             log::error!("mDNS sendQuery {}: {e}", iface.name);
+        }
+    }
+}
+
+fn ipv6_joined() -> &'static std::sync::Mutex<Option<HashSet<u32>>> {
+    static JOINED: OnceLock<std::sync::Mutex<Option<HashSet<u32>>>> = OnceLock::new();
+    JOINED.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// IPv6-capable multicast interfaces (name, interface index). Excludes loopback
+/// and addresses with no usable scope id.
+pub fn candidate_ipv6_interfaces() -> Vec<(String, u32)> {
+    let mut seen = HashSet::new();
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|iface| match iface.addr {
+            IfAddr::V6(v6) => {
+                let index = iface.index?;
+                if v6.ip.is_loopback() || v6.ip.is_multicast() || index == 0 {
+                    return None;
+                }
+                if !seen.insert(index) {
+                    return None;
+                }
+                Some((iface.name, index))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// This host's own non-loopback IPv6 addresses, used to ignore the multicast
+/// loop-back of our own IPv6 queries.
+pub fn candidate_ipv6_addresses() -> Vec<String> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|iface| match iface.addr {
+            IfAddr::V6(v6) if !v6.ip.is_loopback() => Some(v6.ip.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn is_local_ipv6(ip: &str) -> bool {
+    candidate_ipv6_addresses().iter().any(|a| a == ip)
+}
+
+fn create_ipv6_socket() -> io::Result<std::net::UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    socket.set_multicast_loop_v6(true)?;
+    socket.set_only_v6(true)?;
+    socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, MDNS_PORT, 0, 0).into())?;
+    Ok(socket.into())
+}
+
+/// Joins `ff02::fb` on IPv6 interfaces that are missing it, reusing the socket
+/// so a network change only adds memberships. Best-effort: failure never tears
+/// down the IPv4 path.
+fn sync_ipv6_memberships(socket: &std::net::UdpSocket) -> bool {
+    let desired: Vec<u32> = candidate_ipv6_interfaces().iter().map(|(_, i)| *i).collect();
+    let joined = ipv6_joined().lock().unwrap().clone().unwrap_or_default();
+    let mut fresh = HashSet::new();
+    for index in &desired {
+        if joined.contains(index) {
+            continue;
+        }
+        match socket2::SockRef::from(socket).join_multicast_v6(&MDNS_GROUP_V6, *index) {
+            Ok(()) => {
+                fresh.insert(*index);
+                log::debug!("mDNS joined v6 iface {index}");
+            }
+            Err(e) => log::debug!("mDNS joinGroup v6 {index}: {e}"),
+        }
+    }
+    let success: HashSet<u32> = desired
+        .iter()
+        .filter(|i| joined.contains(i))
+        .copied()
+        .chain(fresh)
+        .collect();
+    *ipv6_joined().lock().unwrap() = Some(success.clone());
+    !success.is_empty() || desired.is_empty()
+}
+
+/// Brings the IPv6 `ff02::fb` listener up so IPv6 multicast announcements are
+/// received even on networks where devices never answer IPv4 multicast.
+pub fn ensure_ipv6_started() -> bool {
+    let existing = IPV6_SOCKET.read().unwrap().clone();
+    if !(IPV6_RUNNING.load(Ordering::SeqCst) && existing.is_some()) {
+        match create_ipv6_socket() {
+            Ok(s) => {
+                let socket = Arc::new(s);
+                *IPV6_SOCKET.write().unwrap() = Some(socket.clone());
+                IPV6_RUNNING.store(true, Ordering::SeqCst);
+                *ipv6_joined().lock().unwrap() = None;
+                let worker = socket.clone();
+                std::thread::Builder::new()
+                    .name("plain-mdns-ipv6".to_string())
+                    .spawn(move || run_ipv6_loop(&worker))
+                    .expect("spawn mdns ipv6");
+            }
+            Err(e) => {
+                log::error!("mDNS IPv6 create/bind failed: {e}");
+                return false;
+            }
+        }
+    }
+    if let Some(socket) = IPV6_SOCKET.read().unwrap().clone() {
+        return sync_ipv6_memberships(&socket);
+    }
+    false
+}
+
+fn run_ipv6_loop(socket: &Arc<std::net::UdpSocket>) {
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(RECEIVE_TIMEOUT_MS)));
+    let mut buf = [0u8; RECV_BUF_SIZE];
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((n, src)) => {
+                let std::net::IpAddr::V6(v6) = src.ip() else {
+                    continue;
+                };
+                let sender = v6.to_string();
+                if is_local_ipv6(&sender) {
+                    continue;
+                }
+                SAW_EXTERNAL_MULTICAST.store(true, Ordering::Relaxed);
+                notify_packet_listeners(&buf[..n], &sender);
+            }
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut => {}
+            Err(err) => {
+                log::debug!("mDNS IPv6 receive error, stopping: {err}");
+                if still_current_ipv6(&socket) {
+                    IPV6_RUNNING.store(false, Ordering::SeqCst);
+                }
+                break;
+            }
+        }
+        if !IPV6_RUNNING.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+}
+
+fn still_current_ipv6(socket: &Arc<std::net::UdpSocket>) -> bool {
+    matches!(
+        IPV6_SOCKET.read().unwrap().as_ref(),
+        Some(cur) if Arc::ptr_eq(socket, cur)
+    )
+}
+
+/// Sends a query to the IPv6 multicast group on every IPv6 interface, so
+/// devices that only answer IPv6 multicast are still discovered. The DNS
+/// payload is address-family independent — the v4 packet bytes work as-is.
+fn send_ipv6_query(bytes: &[u8]) {
+    let Some(socket) = IPV6_SOCKET.read().unwrap().clone() else {
+        return;
+    };
+    let target = SocketAddrV6::new(MDNS_GROUP_V6, MDNS_PORT, 0, 0);
+    let interfaces = candidate_ipv6_interfaces();
+    if interfaces.is_empty() {
+        let _ = socket.send_to(bytes, target);
+        return;
+    }
+    for (name, index) in interfaces {
+        let _ = socket2::SockRef::from(&*socket).set_multicast_if_v6(index);
+        if let Err(e) = socket.send_to(bytes, target) {
+            log::error!("mDNS sendQuery v6 {}: {e}", name);
         }
     }
 }

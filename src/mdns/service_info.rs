@@ -1,6 +1,6 @@
 //! mDNS service model + parsed record accessors.
 
-use super::packet_codec::{self, TYPE_A, TYPE_PTR, TYPE_SRV, TYPE_TXT};
+use super::packet_codec::{self, TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV, TYPE_TXT};
 
 /// mDNS service type advertised by PlainApp devices.
 pub const PLAINAPP_SERVICE_TYPE: &str = "_plainapp._tcp.local";
@@ -84,6 +84,15 @@ impl MdnsRecord {
                 "{}.{}.{}.{}",
                 p[s], p[s + 1], p[s + 2], p[s + 3]
             ))
+        } else {
+            None
+        }
+    }
+
+    /// AAAA RDATA — IPv6 textual address.
+    pub fn ipv6(&self) -> Option<String> {
+        if self.record_type == TYPE_AAAA && self.rdata_length == 16 {
+            packet_codec::ipv6_to_string(&self.packet[self.rdata_start..self.rdata_start + 16])
         } else {
             None
         }

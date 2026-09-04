@@ -10,7 +10,7 @@
 //! queries and the responder's answers stay on the same port.
 
 use super::host_responder;
-use super::packet_codec::{self, TYPE_A, TYPE_PTR, TYPE_SRV, TYPE_TXT};
+use super::packet_codec::{self, TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV, TYPE_TXT};
 use super::service_info::PLAINAPP_SERVICE_TYPE;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
@@ -35,6 +35,7 @@ pub struct FoundDevice {
     pub id: String,
     pub name: String,
     pub ips: Vec<String>,
+    pub ipv6: Vec<String>,
     pub port: u16,
     pub device_type: String,
     pub version: String,
@@ -53,6 +54,7 @@ struct Instance {
     platform: String,
     target_hostname: String,
     ips: HashSet<String>,
+    addrs_v6: HashSet<String>,
     txt_records: Vec<String>,
 }
 
@@ -68,12 +70,13 @@ impl Instance {
             platform: String::new(),
             target_hostname: String::new(),
             ips: HashSet::new(),
+            addrs_v6: HashSet::new(),
             txt_records: Vec::new(),
         }
     }
 
     fn complete(&self) -> bool {
-        !self.id.is_empty() && self.port > 0 && !self.ips.is_empty()
+        !self.id.is_empty() && self.port > 0 && (!self.ips.is_empty() || !self.addrs_v6.is_empty())
     }
 }
 
@@ -93,6 +96,10 @@ struct Inner {
     listener: Mutex<Option<host_responder::PacketListener>>,
     client_id: String,
     mdns_hostname: Arc<RwLock<String>>,
+    /// Addresses injected by the caller (its own persistence — plain-rs stores
+    /// nothing). Every browse cycle sends each one a directed unicast PTR
+    /// requery so known devices stay discoverable when multicast is dead.
+    seed_addrs: Mutex<HashSet<String>>,
     on_device: Box<dyn Fn(FoundDevice) + Send + Sync>,
     qu_active: AtomicBool,
     browse_cycles: AtomicU64,
@@ -119,6 +126,7 @@ impl MdnsServiceBrowser {
                 listener: Mutex::new(None),
                 client_id,
                 mdns_hostname,
+                seed_addrs: Mutex::new(HashSet::new()),
                 on_device: Box::new(on_device),
                 qu_active: AtomicBool::new(false),
                 browse_cycles: AtomicU64::new(0),
@@ -171,9 +179,19 @@ impl MdnsServiceBrowser {
         *guard = Some(listener);
     }
 
+    /// Replaces the requery seed addresses. Injected by the caller from its
+    /// own persistence layer (e.g. a peers table); addresses learned at runtime
+    /// from discovered instances are kept separately and merged automatically.
+    pub fn seed_known_addrs(&self, addrs: &[String]) {
+        let mut seed = self.inner.seed_addrs.lock().unwrap();
+        seed.clear();
+        seed.extend(addrs.iter().filter(|a| !a.is_empty()).cloned());
+    }
+
     /// One-shot PTR query used by directed re-discovery of a paired peer.
     pub fn send_ptr_query(&self) {
         dispatch_query(&self.inner, PLAINAPP_SERVICE_TYPE, TYPE_PTR);
+        dispatch_unicast_requery(&self.inner);
     }
 
 
@@ -190,6 +208,7 @@ impl MdnsServiceBrowser {
                 hostname: instance.target_hostname.clone(),
                 port: instance.port,
                 ips: instance.ips.iter().cloned().collect(),
+                ipv6: instance.addrs_v6.iter().cloned().collect(),
                 txt_records: instance.txt_records.clone(),
                 complete: instance.complete(),
             })
@@ -218,6 +237,7 @@ pub struct MdnsServiceSnapshot {
     pub port: u16,
     pub txt_records: Vec<String>,
     pub ips: Vec<String>,
+    pub ipv6: Vec<String>,
     pub complete: bool,
 }
 
@@ -237,6 +257,7 @@ fn browse_once(inner: &Inner) {
     // the responder keeps packet listeners, so discovery resumes seamlessly.
     host_responder::ensure_started(&inner.mdns_hostname.read().unwrap());
     dispatch_query(inner, PLAINAPP_SERVICE_TYPE, TYPE_PTR);
+    dispatch_unicast_requery(inner);
     // Follow up on instances that still lack port / metadata / IPs, re-asking
     // periodically because multicast responses can be dropped. Completed
     // instances refresh from every PTR announcement, which carries SRV/TXT/A
@@ -316,6 +337,45 @@ fn dispatch_query(inner: &Inner, name: &str, qtype: u16) {
     }
 }
 
+/// Sends a QU (unicast-response) PTR query directly to every known address:
+/// the injected seeds plus addresses learned from discovered instances. On
+/// networks that drop mDNS multicast this is the only working discovery path —
+/// peers answer with the full PTR+SRV+TXT+A record set in one packet
+/// (RFC 6763 §12), which `handle_packet` digests like any multicast reply.
+fn dispatch_unicast_requery(inner: &Inner) {
+    let targets = {
+        let seed = inner.seed_addrs.lock().unwrap().clone();
+        let state = inner.state.lock().unwrap();
+        unicast_targets(&seed, &state.instances)
+    };
+    if targets.is_empty() {
+        return;
+    }
+    let bytes = packet_codec::build_query(PLAINAPP_SERVICE_TYPE, TYPE_PTR, true);
+    for ip in targets {
+        if host_responder::is_local_ip(&ip) || host_responder::is_local_ipv6(&ip) {
+            continue;
+        }
+        host_responder::send_unicast_query(&bytes, &ip);
+    }
+}
+
+/// Union of injected seed addresses and addresses learned from discovered
+/// instances. Sorted so dispatch order is deterministic.
+fn unicast_targets(
+    seed_addrs: &HashSet<String>,
+    instances: &HashMap<String, Instance>,
+) -> Vec<String> {
+    let mut targets: HashSet<String> = seed_addrs.clone();
+    for instance in instances.values() {
+        targets.extend(instance.ips.iter().cloned());
+        targets.extend(instance.addrs_v6.iter().cloned());
+    }
+    let mut list: Vec<String> = targets.into_iter().collect();
+    list.sort();
+    list
+}
+
 fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
     // Ignore our own looped-back packets so we don't discover ourselves and
     // re-query our own SRV/TXT records on every discovery cycle.
@@ -355,6 +415,20 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
         for record in &records {
             if record.record_type == TYPE_A {
                 if let Some(ip) = record.ip() {
+                    grouped
+                        .entry(record.name.to_lowercase())
+                        .or_default()
+                        .insert(ip);
+                }
+            }
+        }
+        grouped
+    };
+    let aaaa_by_hostname: HashMap<String, HashSet<String>> = {
+        let mut grouped: HashMap<String, HashSet<String>> = HashMap::new();
+        for record in &records {
+            if record.record_type == TYPE_AAAA {
+                if let Some(ip) = record.ipv6() {
                     grouped
                         .entry(record.name.to_lowercase())
                         .or_default()
@@ -448,6 +522,16 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
                 }
             }
         }
+        for (hostname, addrs) in aaaa_by_hostname {
+            if let Some(key) = state.hostname_to_instance.get(&hostname).cloned() {
+                if let Some(instance) = state.instances.get_mut(&key) {
+                    if instance.addrs_v6 != addrs {
+                        instance.addrs_v6 = addrs;
+                    }
+                    touched.insert(key);
+                }
+            }
+        }
         // Drop the withdrawn instances' follow-up query timestamps too, so a
         // later republish under the same FQDN is re-resolved without waiting
         // out FOLLOW_UP_RETRY_MS.
@@ -522,10 +606,13 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
     for instance in complete {
         let mut ips: Vec<String> = instance.ips.iter().cloned().collect();
         ips.sort();
+        let mut ipv6: Vec<String> = instance.addrs_v6.iter().cloned().collect();
+        ipv6.sort();
         (inner.on_device)(FoundDevice {
             id: instance.id,
             name: instance.instance_name,
             ips,
+            ipv6,
             port: instance.port,
             device_type: instance.device_type,
             version: instance.version,
@@ -896,6 +983,36 @@ mod tests {
                 .all(|i| i.ips.contains(&"192.168.1.10".to_string())
                     && !i.ips.contains(&"192.168.1.20".to_string())));
         }
+    }
+
+    #[test]
+    fn unicast_targets_merges_seed_and_learned_addrs() {
+        let mut seed = HashSet::new();
+        seed.insert("192.168.1.30".to_string());
+        let mut instances = HashMap::new();
+        let mut inst = Instance::new("p9._plainapp._tcp.local".to_string(), "p9".to_string());
+        inst.ips.insert("192.168.1.20".to_string());
+        inst.ips.insert("192.168.1.30".to_string());
+        inst.addrs_v6.insert("fd00::9".to_string());
+        instances.insert(inst.instance_fqdn.clone(), inst);
+        let targets = unicast_targets(&seed, &instances);
+        assert_eq!(targets, vec!["192.168.1.20", "192.168.1.30", "fd00::9"]);
+    }
+
+    #[test]
+    fn unicast_targets_empty_when_nothing_known() {
+        assert!(unicast_targets(&HashSet::new(), &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn seed_known_addrs_replaces_previous_seed_and_skips_empty() {
+        let browser =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
+        browser.seed_known_addrs(&["10.0.0.5".to_string(), "10.0.0.6".to_string()]);
+        browser.seed_known_addrs(&["192.168.1.2".to_string(), String::new()]);
+        let seed = browser.inner.seed_addrs.lock().unwrap();
+        assert_eq!(seed.len(), 1);
+        assert!(seed.contains("192.168.1.2"));
     }
 
     fn local_ip_sender() -> Option<String> {
