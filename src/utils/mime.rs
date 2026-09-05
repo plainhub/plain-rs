@@ -127,7 +127,6 @@ pub fn mime_extension(mime: &str) -> &'static str {
         "application/javascript" => "js",
         "text/csv" => "csv",
         "text/tab-separated-values" => "tsv",
-        "text/xml" => "xml",
         "text/markdown" => "md",
         // Fonts
         "font/ttf" | "application/x-font-ttf" => "ttf",
