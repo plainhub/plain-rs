@@ -5,9 +5,23 @@ pub const CORS: &[u8] = b"access-control-allow-origin: *\r\n\
                        access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
                        access-control-allow-headers: *\r\n";
 
+/// Outcome of parsing an HTTP `Range` header against a representation size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeParse {
+    /// No usable `Range` header (absent, non-`bytes` unit, or malformed) —
+    /// serve the full 200 response, per RFC 7233 §3.1 ("an origin server
+    /// MUST ignore a Range header field that contains a range unit it does
+    /// not understand" and malformed ranges are likewise ignored).
+    Full,
+    /// A satisfiable byte range: inclusive `(start, end)`.
+    Partial(u64, u64),
+    /// Syntactically valid but unsatisfiable (start ≥ size, or a zero-length
+    /// suffix) — respond 416 with `Content-Range: bytes */size`, per
+    /// RFC 7233 §4.4.
+    Unsatisfiable,
+}
+
 /// Parse an HTTP `Range` header (RFC 7233 §2.1) against a file size.
-/// Returns the inclusive `(start, end)` byte range to serve, or `None`
-/// when the header is absent, unsupported, or out of bounds.
 ///
 /// Supported forms:
 ///   * `bytes=0-499`   → first 500 bytes
@@ -16,44 +30,60 @@ pub const CORS: &[u8] = b"access-control-allow-origin: *\r\n\
 ///
 /// Multi-range requests (`bytes=0-10,20-30`) are not supported — the
 /// first range is served and the rest ignored, which keeps downloads
-/// working without the multipart/byteranges dance. Callers should serve
-/// a full 200 response when this returns `None`.
-pub fn parse_range_header(range: &str, file_size: u64) -> Option<(u64, u64)> {
-    let spec = range.strip_prefix("bytes=")?;
-    let spec = spec.split(',').next()?.trim();
-    let (start_s, end_s) = spec.split_once('-')?;
+/// working without the multipart/byteranges dance.
+pub fn parse_range_header(range: &str, file_size: u64) -> RangeParse {
+    use RangeParse::*;
+    let Some(spec) = range.strip_prefix("bytes=") else {
+        return Full;
+    };
+    let Some(spec) = spec.split(',').next() else {
+        return Full;
+    };
+    let spec = spec.trim();
+    let Some((start_s, end_s)) = spec.split_once('-') else {
+        return Full;
+    };
     let start_s = start_s.trim();
     let end_s = end_s.trim();
     if file_size == 0 {
-        return None;
+        // Nothing can be served partially; a 200 with an empty body is the
+        // least surprising response and matches the pre-tri-state behavior.
+        return Full;
     }
-    let (start, end) = match (start_s.is_empty(), end_s.is_empty()) {
+    match (start_s.is_empty(), end_s.is_empty()) {
         (false, false) => {
-            let start: u64 = start_s.parse().ok()?;
-            let end: u64 = end_s.parse().ok()?;
-            if start > end || start >= file_size {
-                return None;
+            let (Ok(start), Ok(end)) = (start_s.parse::<u64>(), end_s.parse::<u64>()) else {
+                return Full;
+            };
+            if start > end {
+                // Inverted range: invalid per RFC 7233 §2.1, ignore the header.
+                return Full;
             }
-            (start, end.min(file_size - 1))
+            if start >= file_size {
+                return Unsatisfiable;
+            }
+            Partial(start, end.min(file_size - 1))
         }
         (false, true) => {
-            let start: u64 = start_s.parse().ok()?;
+            let Ok(start) = start_s.parse::<u64>() else {
+                return Full;
+            };
             if start >= file_size {
-                return None;
+                return Unsatisfiable;
             }
-            (start, file_size - 1)
+            Partial(start, file_size - 1)
         }
         (true, false) => {
-            let n: u64 = end_s.parse().ok()?;
+            let Ok(n) = end_s.parse::<u64>() else {
+                return Full;
+            };
             if n == 0 {
-                return None;
+                return Unsatisfiable;
             }
-            let start = file_size.saturating_sub(n);
-            (start, file_size - 1)
+            Partial(file_size.saturating_sub(n), file_size - 1)
         }
-        (true, true) => return None,
-    };
-    Some((start, end))
+        (true, true) => Full, // "bytes=-": malformed, ignore
+    }
 }
 
 /// Build a `Content-Disposition` header value (RFC 6266 / RFC 5987).
@@ -68,49 +98,55 @@ pub fn content_disposition(kind: &str, filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use RangeParse::{Full, Partial, Unsatisfiable};
 
     #[test]
     fn parse_range_start_end() {
-        assert_eq!(parse_range_header("bytes=0-499", 1000), Some((0, 499)));
-        assert_eq!(parse_range_header("bytes=100-199", 1000), Some((100, 199)));
+        assert_eq!(parse_range_header("bytes=0-499", 1000), Partial(0, 499));
+        assert_eq!(parse_range_header("bytes=100-199", 1000), Partial(100, 199));
     }
 
     #[test]
     fn parse_range_open_end() {
-        assert_eq!(parse_range_header("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(parse_range_header("bytes=500-", 1000), Partial(500, 999));
+        assert_eq!(parse_range_header("bytes=0-", 1000), Partial(0, 999));
     }
 
     #[test]
     fn parse_range_suffix() {
-        assert_eq!(parse_range_header("bytes=-500", 1000), Some((500, 999)));
-        assert_eq!(parse_range_header("bytes=-2000", 1000), Some((0, 999)));
+        assert_eq!(parse_range_header("bytes=-500", 1000), Partial(500, 999));
+        assert_eq!(parse_range_header("bytes=-2000", 1000), Partial(0, 999));
     }
 
     #[test]
     fn parse_range_clamps_end_to_file_size() {
-        assert_eq!(parse_range_header("bytes=900-2000", 1000), Some((900, 999)));
+        assert_eq!(parse_range_header("bytes=900-2000", 1000), Partial(900, 999));
     }
 
     #[test]
-    fn parse_range_rejects_out_of_bounds_start() {
-        assert_eq!(parse_range_header("bytes=1000-", 1000), None);
-        assert_eq!(parse_range_header("bytes=2000-3000", 1000), None);
+    fn parse_range_out_of_bounds_is_unsatisfiable() {
+        // RFC 7233 §4.4: syntactically valid but beyond EOF → 416 material.
+        assert_eq!(parse_range_header("bytes=1000-", 1000), Unsatisfiable);
+        assert_eq!(parse_range_header("bytes=2000-3000", 1000), Unsatisfiable);
+        assert_eq!(parse_range_header("bytes=-0", 1000), Unsatisfiable);
+        assert_eq!(parse_range_header("bytes=999-", 1000), Partial(999, 999));
     }
 
     #[test]
-    fn parse_range_rejects_invalid_input() {
-        assert_eq!(parse_range_header("", 1000), None);
-        assert_eq!(parse_range_header("items=0-10", 1000), None);
-        assert_eq!(parse_range_header("bytes=abc-def", 1000), None);
-        assert_eq!(parse_range_header("bytes=-", 1000), None);
-        assert_eq!(parse_range_header("bytes=-0", 1000), None);
-        assert_eq!(parse_range_header("bytes=5-2", 1000), None);
-        assert_eq!(parse_range_header("bytes=0-10", 0), None);
+    fn parse_range_malformed_is_full() {
+        // Unknown units, unparsable numbers and inverted ranges are ignored
+        // (RFC 7233 §3.1) — the caller serves the whole representation.
+        assert_eq!(parse_range_header("", 1000), Full);
+        assert_eq!(parse_range_header("items=0-10", 1000), Full);
+        assert_eq!(parse_range_header("bytes=abc-def", 1000), Full);
+        assert_eq!(parse_range_header("bytes=-", 1000), Full);
+        assert_eq!(parse_range_header("bytes=5-2", 1000), Full);
+        assert_eq!(parse_range_header("bytes=0-10", 0), Full);
     }
 
     #[test]
     fn parse_range_multi_range_serves_first() {
-        assert_eq!(parse_range_header("bytes=0-10,20-30", 1000), Some((0, 10)));
+        assert_eq!(parse_range_header("bytes=0-10,20-30", 1000), Partial(0, 10));
     }
 
     #[test]
