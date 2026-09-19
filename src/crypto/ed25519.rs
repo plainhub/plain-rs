@@ -17,6 +17,18 @@ pub fn ed25519_generate() -> ([u8; 64], [u8; 32]) {
     (sk_bytes, vk_bytes)
 }
 
+/// Derive the raw 32-byte verifying key from 64-byte Ed25519 keypair bytes.
+pub fn ed25519_public_from_keypair(keypair_bytes: &[u8]) -> Option<[u8; 32]> {
+    if keypair_bytes.len() != 64 {
+        return None;
+    }
+    let mut arr = [0u8; 64];
+    arr.copy_from_slice(keypair_bytes);
+    SigningKey::from_keypair_bytes(&arr)
+        .ok()
+        .map(|k| k.verifying_key().to_bytes())
+}
+
 /// Sign `message` with the 64-byte Ed25519 keypair bytes.  Returns Base64 signature or empty string on error.
 pub fn ed25519_sign(keypair_bytes: &[u8], message: &[u8]) -> String {
     if keypair_bytes.len() != 64 {

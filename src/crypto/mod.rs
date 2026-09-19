@@ -7,7 +7,7 @@ mod cross_platform_vectors;
 
 pub use crate::utils::base64::{base64_decode, base64_encode};
 pub use ecdh::EcdhSession;
-pub use ed25519::{ed25519_generate, ed25519_sign, ed25519_verify};
+pub use ed25519::{ed25519_generate, ed25519_public_from_keypair, ed25519_sign, ed25519_verify};
 pub use symmetric::{
     chacha20_decrypt, chacha20_encrypt, xchacha_decrypt, xchacha_decrypt_raw, xchacha_encrypt,
     xchacha_encrypt_raw,
