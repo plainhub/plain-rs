@@ -67,6 +67,9 @@ pub fn mime_from_ext(filename: &str) -> &'static str {
         "xz" => "application/x-xz",
         // Documents
         "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         // Default
         _ => "application/octet-stream",
     }
@@ -110,6 +113,9 @@ pub fn mime_extension(mime: &str) -> &'static str {
         "audio/aac" => "aac",
         // Documents / data
         "application/pdf" => "pdf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
         "application/zip" | "application/x-zip-compressed" => "zip",
         "application/json" => "json",
         "application/xml" | "text/xml" => "xml",
@@ -178,6 +184,17 @@ mod tests {
     }
 
     #[test]
+    fn ext_roundtrips_office_documents() {
+        for ext in ["doc", "docx", "xlsx"] {
+            assert_eq!(
+                mime_extension(mime_from_ext(&format!("f.{ext}"))),
+                ext,
+                "roundtrip failed for {ext}"
+            );
+        }
+    }
+
+    #[test]
     fn ext_falls_back_to_bin() {
         assert_eq!(mime_extension("application/x-totally-made-up"), "bin");
         assert_eq!(mime_extension(""), "bin");
@@ -193,6 +210,21 @@ mod tests {
         assert_eq!(mime_extension("application/x-gzip"), "gz");
         assert_eq!(mime_extension("application/x-font-ttf"), "ttf");
         assert_eq!(mime_extension("IMAGE/PNG"), "png"); // case-insensitive
+    }
+
+    #[test]
+    fn office_documents_cover_plain_app_doc_mimes() {
+        // plain-app `DocMediaStoreHelper.extraDocumentMimeTypes` — the doc
+        // formats beyond `text/*` the media doc queries must recognize.
+        assert_eq!(mime_from_ext("report.doc"), "application/msword");
+        assert_eq!(
+            mime_from_ext("report.DOCX"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(
+            mime_from_ext("sheet.xlsx"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
     }
 
     #[test]
