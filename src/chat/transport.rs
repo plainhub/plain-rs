@@ -138,6 +138,7 @@ pub async fn deliver_to_peer<T: PeerTransport>(
 /// encrypted with `key` — callers are responsible for passing the
 /// correct key (channel key when `channel_id_opt.is_some()`,
 /// otherwise the peer's shared key).
+#[allow(clippy::too_many_arguments)]
 pub async fn deliver_channel_system_message<T: PeerTransport>(
     transport: &T,
     peer: &DPeer,
