@@ -206,3 +206,51 @@ fn dest_path_joins_data_dir_with_relative() {
         std::path::PathBuf::from("/data/files/ab/cd/abcdef0123456789.jpg")
     );
 }
+
+fn seed_named_chat(db: &ChatDb, at: &str, uri: &str, name: &str) {
+    let mut chat = crate::chat::db::DChat::new(
+        "me",
+        "peer1",
+        "",
+        &serde_json::json!({
+            "type": "FILES",
+            "value": { "items": [ {"uri": uri, "fileName": name} ] }
+        })
+        .to_string(),
+    );
+    chat.id = format!("c-{at}");
+    chat.created_at = at.to_string();
+    chat.updated_at = at.to_string();
+    db.insert_chat(&chat);
+}
+
+#[test]
+fn file_name_map_prefers_newest_chat_and_strips_fid_ext() {
+    let dir = unique_tmp_dir("name-map");
+    let db = ChatDb::open(&dir.join("local_chat.db")).unwrap();
+    seed_named_chat(&db, "2026-01-01T00:00:01Z", "fid:aa11.jpg", "old.jpg");
+    seed_named_chat(&db, "2026-01-02T00:00:01Z", "fid:aa11.jpg", "new.jpg");
+    // key is the bare hash — extension stripped.
+    let map = file_name_map(&db.get_all_chats());
+    assert_eq!(map.get("aa11").map(String::as_str), Some("new.jpg"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn display_name_falls_back_to_mime_extension() {
+    let mut f = DAppFile {
+        id: "bb22".to_string(),
+        size: 1,
+        mime_type: "image/png".to_string(),
+        real_path: String::new(),
+        ref_count: 1,
+        weak_hash: String::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let mut map = std::collections::HashMap::new();
+    map.insert("bb22".to_string(), "  ".to_string()); // blank name ignored
+    assert_eq!(display_name(&f, &map), "file.png");
+    f.mime_type = "application/octet-stream".to_string();
+    assert_eq!(display_name(&f, &map), "file");
+}

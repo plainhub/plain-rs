@@ -375,6 +375,67 @@ pub async fn copy_to_async(
     Ok(total)
 }
 
+// ── Display names for app files (GraphQL AppFile.fileName) ─────────────────
+
+use std::collections::HashMap;
+
+/// Map content-hash prefix → original upload file name by scanning chat
+/// contents (newest chat wins). The `fid:` URI prefix and any extension
+/// are stripped so the key matches `DAppFile.id` (the bare hash).
+pub fn file_name_map(chats: &[DChat]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut sorted: Vec<&DChat> = chats.iter().collect();
+    sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    for chat in sorted {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&chat.content) else {
+            continue;
+        };
+        let Some(items) = v
+            .get("value")
+            .and_then(|vv| vv.get("items"))
+            .and_then(|i| i.as_array())
+        else {
+            continue;
+        };
+        for item in items {
+            let (Some(uri), Some(name)) = (
+                item.get("uri").and_then(|u| u.as_str()),
+                item.get("fileName").and_then(|n| n.as_str()),
+            ) else {
+                continue;
+            };
+            if !uri.starts_with("fid:") || name.is_empty() {
+                continue;
+            }
+            let hash = uri.strip_prefix("fid:").unwrap_or(uri);
+            let key = hash.split('.').next().unwrap_or(hash);
+            map.entry(key.to_string())
+                .or_insert_with(|| name.to_string());
+        }
+    }
+    map
+}
+
+/// Display name for an app-file record: the original upload name when a
+/// chat references it, else a generic `file.{ext}` from the MIME table.
+pub fn display_name(file: &DAppFile, name_map: &HashMap<String, String>) -> String {
+    let from_chat = name_map
+        .get(&file.id)
+        .cloned()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !from_chat.is_empty() {
+        return from_chat;
+    }
+    let ext = mime_extension(&file.mime_type);
+    if ext == "bin" {
+        "file".to_string()
+    } else {
+        format!("file.{ext}")
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/chat/app_file_store.rs"]
 mod tests;
