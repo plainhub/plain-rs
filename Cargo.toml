@@ -9,6 +9,13 @@ rust-version = "1.74"
 [lib]
 name = "plain_rs"
 
+[features]
+# Shared chat domain (SQLite storage, pairing/channel wire protocol),
+# extracted from plain-desktop's port of the plain-app chat stack.
+# Desktop and plain-nas both enable this; consumers without chat skip
+# the rusqlite build entirely.
+chat = ["dep:serde_json", "dep:rusqlite"]
+
 [dependencies]
 chacha20poly1305 = "0.10"
 p256 = { version = "0.13", default-features = false, features = ["ecdh", "pkcs8", "std"] }
@@ -20,6 +27,11 @@ log = "0.4"
 if-addrs = "0.13"
 socket2 = { version = "0.5", features = ["all"] }
 serde = { version = "1", features = ["derive"] }
+# Chat domain (feature "chat"): wire-JSON parsing + the plain-app chat
+# SQLite schema (same version plain-desktop pins: 0.32, bundled so no
+# system libsqlite3 is needed on musl/static builds).
+serde_json = { version = "1", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 # Self-signed TLS cert generation for the local HTTPS servers
 # (plain-desktop local/tls.rs, plain-nas cmd/run.rs). ring backend to
 # match the consumers' rustls stacks.
