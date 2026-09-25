@@ -28,11 +28,7 @@ fn manager() -> PairingManager<TestTransport> {
             .as_nanos(),
     ));
     let db = ChatDb::open(&path).unwrap();
-    let identity = Arc::new(ChatIdentity {
-        client_id: "self".into(),
-        device_name: "NAS".into(),
-        ed25519_keypair: String::new(),
-    });
+    let identity = Arc::new(ChatIdentity::new("self", "NAS", ""));
     PairingManager::new(db, identity, "NAS", Arc::new(TestTransport))
 }
 

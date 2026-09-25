@@ -239,7 +239,7 @@ fn handle_invite_accept<T: PeerTransport + 'static>(
 ) -> bool {
     let db = &service.db;
     let client_id: &str = &service.identity.client_id;
-    let device_name = &service.identity.device_name;
+    let device_name = service.identity.device_name();
     let msg: ChannelInviteAccept = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => {
@@ -537,7 +537,7 @@ fn handle_leave<T: PeerTransport + 'static>(
 ) -> bool {
     let db = &service.db;
     let client_id: &str = &service.identity.client_id;
-    let device_name = &service.identity.device_name;
+    let device_name = service.identity.device_name();
     let msg: ChannelLeave = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => {

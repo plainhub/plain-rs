@@ -36,11 +36,7 @@ fn service(dir_label: &str) -> ChatService<TestTransport> {
     let dir = unique_tmp_dir(dir_label);
     let db = ChatDb::open(&dir.join("local_chat.db")).unwrap();
     let (kp, _vk) = crate::ed25519_generate();
-    let identity = ChatIdentity {
-        client_id: "me-nas".to_string(),
-        device_name: "nas-box".to_string(),
-        ed25519_keypair: crate::base64_encode(&kp),
-    };
+    let identity = ChatIdentity::new("me-nas", "nas-box", crate::base64_encode(&kp));
     ChatService::new(
         db,
         crate::base64_encode(&[5u8; 32]),

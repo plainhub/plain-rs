@@ -200,7 +200,7 @@ impl<T: PeerTransport + 'static> PairingManager<T> {
         let ts = now_ms();
         let mut req = PairingRequest {
             from_id: identity.client_id.clone(),
-            from_name: identity.device_name.clone(),
+            from_name: identity.device_name(),
             port: local_port,
             device_type: self.local_device_type.to_string(),
             ecdh_public_key: ecdh_pub_b64,

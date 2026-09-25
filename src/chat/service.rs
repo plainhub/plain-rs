@@ -35,10 +35,35 @@ use crate::chat::transport::{PeerTransport, deliver_to_peer, peer_graphql_urls};
 /// Local device identity for pairing and message signing.
 pub struct ChatIdentity {
     pub client_id: String,
-    pub device_name: String,
+    /// Display name — interior-mutable so a runtime rename (the
+    /// `updateDeviceName` mutation) propagates to every reader of the
+    /// shared `Arc<ChatIdentity>`.
+    device_name: std::sync::RwLock<String>,
     /// Base64 64-byte Ed25519 keypair — same value as plain-app's
     /// `TempData.ed25519Keypair`.
     pub ed25519_keypair: String,
+}
+
+impl ChatIdentity {
+    pub fn new(
+        client_id: impl Into<String>,
+        device_name: impl Into<String>,
+        ed25519_keypair: impl Into<String>,
+    ) -> Self {
+        Self {
+            client_id: client_id.into(),
+            device_name: std::sync::RwLock::new(device_name.into()),
+            ed25519_keypair: ed25519_keypair.into(),
+        }
+    }
+
+    pub fn device_name(&self) -> String {
+        self.device_name.read().unwrap().clone()
+    }
+
+    pub fn set_device_name(&self, name: &str) {
+        *self.device_name.write().unwrap() = name.to_string();
+    }
 }
 
 /// App-specific side effects of the chat flow.
