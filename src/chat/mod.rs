@@ -26,5 +26,6 @@ pub mod db;
 pub mod enums;
 pub mod events;
 pub mod pairing;
+pub mod peer_auth;
 pub mod service;
 pub mod transport;

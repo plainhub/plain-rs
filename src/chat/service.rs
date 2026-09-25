@@ -70,7 +70,8 @@ pub struct ChatService<T: PeerTransport> {
     pub cacher: ChatCacher,
     /// Base64 local URL token — the key behind `/fs` file ids.
     pub token: String,
-    pub identity: ChatIdentity,
+    /// Shared with PairingManager so a device-name update propagates.
+    pub identity: std::sync::Arc<ChatIdentity>,
     /// Device type advertised in channel wire traffic
     /// (COMPUTER on desktop, NAS on plain-nas).
     pub wire_device_type: DeviceType,
@@ -89,7 +90,7 @@ impl<T: PeerTransport + 'static> ChatService<T> {
     pub fn new(
         db: ChatDb,
         token: String,
-        identity: ChatIdentity,
+        identity: std::sync::Arc<ChatIdentity>,
         wire_device_type: DeviceType,
         data_dir: PathBuf,
         transport: Arc<T>,

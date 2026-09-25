@@ -44,7 +44,7 @@ fn service(dir_label: &str) -> ChatService<TestTransport> {
     ChatService::new(
         db,
         crate::base64_encode(&[5u8; 32]),
-        identity,
+        std::sync::Arc::new(identity),
         DeviceType::Nas,
         dir,
         Arc::new(TestTransport),
