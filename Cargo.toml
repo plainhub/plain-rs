@@ -14,7 +14,7 @@ name = "plain_rs"
 # extracted from plain-desktop's port of the plain-app chat stack.
 # Desktop and plain-nas both enable this; consumers without chat skip
 # the rusqlite build entirely.
-chat = ["dep:serde_json", "dep:rusqlite"]
+chat = ["dep:serde_json", "dep:rusqlite", "tokio/sync", "tokio/rt", "tokio/fs"]
 
 [dependencies]
 chacha20poly1305 = "0.10"

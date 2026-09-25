@@ -24,4 +24,7 @@ pub mod channel;
 pub mod content;
 pub mod db;
 pub mod enums;
+pub mod events;
 pub mod pairing;
+pub mod service;
+pub mod transport;
