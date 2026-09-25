@@ -32,7 +32,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::utils::hex::bytes_to_hex;
 use crate::utils::mime::mime_extension;
 
-use crate::chat::db::{ChatDb, DAppFile};
+use crate::chat::db::{ChatDb, DAppFile, DChat};
 
 /// Default MIME type when the client did not supply one.
 const DEFAULT_MIME: &str = "application/octet-stream";
