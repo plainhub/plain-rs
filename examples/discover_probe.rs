@@ -25,7 +25,8 @@ fn main() {
     log::set_max_level(log::LevelFilter::Debug);
 
     host_responder::add_packet_listener(Arc::new(|data: &[u8], sender: &str| {
-        let external = !host_responder::is_local_ip(sender) && !host_responder::is_local_ipv6(sender);
+        let external =
+            !host_responder::is_local_ip(sender) && !host_responder::is_local_ipv6(sender);
         println!("[packet] {} len={} local={}", sender, data.len(), !external);
     }));
 
@@ -53,7 +54,12 @@ fn main() {
     for i in 1..=8 {
         std::thread::sleep(Duration::from_secs(5));
         let snap = browser.snapshot();
-        println!("=== t={}s instances={} running={} ===", i * 5, snap.len(), browser.is_running());
+        println!(
+            "=== t={}s instances={} running={} ===",
+            i * 5,
+            snap.len(),
+            browser.is_running()
+        );
         for s in snap {
             println!(
                 "   {} complete={} port={} ips={:?} v6={:?}",

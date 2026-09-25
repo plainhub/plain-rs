@@ -104,9 +104,7 @@ impl FromSql for ChatStatus {
 
 // ── ChannelStatus ──────────────────────────────────────────────────────────
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ChannelStatus {
     #[default]
@@ -152,9 +150,7 @@ impl FromSql for ChannelStatus {
 
 // ── MemberStatus ───────────────────────────────────────────────────────────
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MemberStatus {
     #[default]
@@ -197,9 +193,7 @@ impl FromSql for MemberStatus {
 
 // ── DeviceType ─────────────────────────────────────────────────────────────
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DeviceType {
     #[default]

@@ -6,8 +6,8 @@
 //! records.
 
 use super::packet_codec::{
-    self, DNS_CACHE_FLUSH_CLASS_IN, DNS_CLASS_IN, TTL_SECONDS, TYPE_A, TYPE_ANY, TYPE_PTR,
-    TYPE_SRV, TYPE_TXT, MdnsQuestion,
+    self, DNS_CACHE_FLUSH_CLASS_IN, DNS_CLASS_IN, MdnsQuestion, TTL_SECONDS, TYPE_A, TYPE_ANY,
+    TYPE_PTR, TYPE_SRV, TYPE_TXT,
 };
 use super::service_info::MdnsServiceInfo;
 
@@ -238,8 +238,7 @@ mod tests {
 
     #[test]
     fn goodbye_carries_ptr_srv_txt_with_zero_ttl() {
-        let parsed =
-            packet_codec::parse_response(&build_goodbye(&service(8443))).expect("parse");
+        let parsed = packet_codec::parse_response(&build_goodbye(&service(8443))).expect("parse");
         assert!(parsed.is_response());
         let types: Vec<u16> = parsed.answers.iter().map(|r| r.record_type).collect();
         assert_eq!(types, vec![TYPE_PTR, TYPE_SRV, TYPE_TXT]);

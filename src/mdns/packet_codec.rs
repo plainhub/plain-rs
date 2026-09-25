@@ -67,7 +67,14 @@ pub fn build_response_if_match(
     let mut out = Vec::new();
     write_header(&mut out, ips.len(), 0);
     for ip in ips {
-        write_record(&mut out, &name_bytes, TYPE_A, DNS_CACHE_FLUSH_CLASS_IN, TTL_SECONDS, &ip_to_bytes(ip));
+        write_record(
+            &mut out,
+            &name_bytes,
+            TYPE_A,
+            DNS_CACHE_FLUSH_CLASS_IN,
+            TTL_SECONDS,
+            &ip_to_bytes(ip),
+        );
     }
     Some(MdnsResponse {
         bytes: out,
@@ -87,7 +94,14 @@ pub fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Vec<u8> {
     write_u16(&mut out, 0); // ARCOUNT
     out.extend_from_slice(&encode_name(name));
     write_u16(&mut out, qtype);
-    write_u16(&mut out, if unicast_response { 0x8001 } else { DNS_CLASS_IN });
+    write_u16(
+        &mut out,
+        if unicast_response {
+            0x8001
+        } else {
+            DNS_CLASS_IN
+        },
+    );
     out
 }
 
@@ -299,7 +313,9 @@ pub fn write_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 pub fn ip_to_bytes(ip: &str) -> Vec<u8> {
-    ip.split('.').filter_map(|part| part.parse::<u8>().ok()).collect()
+    ip.split('.')
+        .filter_map(|part| part.parse::<u8>().ok())
+        .collect()
 }
 
 /// Formats 16 raw bytes of AAAA RDATA as standard IPv6 text, compressing the
@@ -328,7 +344,12 @@ pub fn ipv6_to_string(bytes: &[u8]) -> Option<String> {
             i += 1;
         }
     }
-    let fmt = |r: &[u16]| r.iter().map(|h| format!("{h:x}")).collect::<Vec<_>>().join(":");
+    let fmt = |r: &[u16]| {
+        r.iter()
+            .map(|h| format!("{h:x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
     match best {
         Some((s, l)) if l >= 2 => {
             let e = s + l;
@@ -400,11 +421,14 @@ mod tests {
             }
             ipv6_to_string(&b).expect("ipv6")
         };
-        assert_eq!(v(&[0xfe80,0,0,0,0,0xcc7,0x94ea,0xcb1]), "fe80::cc7:94ea:cb1");
-        assert_eq!(v(&[0x2001,0xdb8,0,0,0,0,0,1]), "2001:db8::1");
-        assert_eq!(v(&[0,0,0,0,0,0,0,1]), "::1");
-        assert_eq!(v(&[1,2,3,4,5,6,7,8]), "1:2:3:4:5:6:7:8");
-        assert!(ipv6_to_string(&[1,2,3,4]).is_none());
+        assert_eq!(
+            v(&[0xfe80, 0, 0, 0, 0, 0xcc7, 0x94ea, 0xcb1]),
+            "fe80::cc7:94ea:cb1"
+        );
+        assert_eq!(v(&[0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]), "2001:db8::1");
+        assert_eq!(v(&[0, 0, 0, 0, 0, 0, 0, 1]), "::1");
+        assert_eq!(v(&[1, 2, 3, 4, 5, 6, 7, 8]), "1:2:3:4:5:6:7:8");
+        assert!(ipv6_to_string(&[1, 2, 3, 4]).is_none());
     }
 
     #[test]

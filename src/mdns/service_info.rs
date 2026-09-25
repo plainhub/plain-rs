@@ -9,7 +9,7 @@ pub const PLAINAPP_SERVICE_TYPE: &str = "_plainapp._tcp.local";
 #[derive(Debug, Clone)]
 pub struct MdnsServiceInfo {
     pub instance_name: String,   // e.g. "Pixel 7 Pro"
-    pub service_type: String,   // e.g. "_plainapp._tcp.local"
+    pub service_type: String,    // e.g. "_plainapp._tcp.local"
     pub target_hostname: String, // e.g. "plainapp-abc123.local"
     pub port: u16,
     pub txt_records: Vec<String>, // e.g. ["id=abc123", "dv=PHONE"]
@@ -80,10 +80,7 @@ impl MdnsRecord {
         if self.record_type == TYPE_A && self.rdata_length == 4 {
             let p = &self.packet;
             let s = self.rdata_start;
-            Some(format!(
-                "{}.{}.{}.{}",
-                p[s], p[s + 1], p[s + 2], p[s + 3]
-            ))
+            Some(format!("{}.{}.{}.{}", p[s], p[s + 1], p[s + 2], p[s + 3]))
         } else {
             None
         }
@@ -108,9 +105,7 @@ impl MdnsRecord {
             if offset + len > end {
                 break;
             }
-            strings.push(
-                String::from_utf8_lossy(&self.packet[offset..offset + len]).to_string(),
-            );
+            strings.push(String::from_utf8_lossy(&self.packet[offset..offset + len]).to_string());
             offset += len;
         }
         strings

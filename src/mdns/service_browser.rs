@@ -194,7 +194,6 @@ impl MdnsServiceBrowser {
         dispatch_unicast_requery(&self.inner);
     }
 
-
     /// Read-only snapshot of every currently-known service instance.
     pub fn snapshot(&self) -> Vec<MdnsServiceSnapshot> {
         let state = self.inner.state.lock().unwrap();
@@ -279,7 +278,8 @@ fn browse_once(inner: &Inner) {
             .map(|instance| {
                 let key = instance.instance_fqdn.clone();
                 DueFollowUp {
-                    srv_txt_due: now.saturating_sub(*state.srv_txt_queried_at.get(&key).unwrap_or(&0))
+                    srv_txt_due: now
+                        .saturating_sub(*state.srv_txt_queried_at.get(&key).unwrap_or(&0))
                         >= FOLLOW_UP_RETRY_MS,
                     a_due: !instance.target_hostname.is_empty()
                         && now.saturating_sub(*state.a_queried_at.get(&key).unwrap_or(&0))
@@ -444,7 +444,9 @@ fn handle_packet(inner: &Inner, data: &[u8], sender: &str) {
             for key in &goodbye {
                 state.instances.remove(key);
             }
-            state.hostname_to_instance.retain(|_, v| !goodbye.contains(v));
+            state
+                .hostname_to_instance
+                .retain(|_, v| !goodbye.contains(v));
         }
         for record in &records {
             match record.record_type {
@@ -646,10 +648,7 @@ fn goodbye_instance_keys(records: &[&super::service_info::MdnsRecord]) -> HashSe
 
 /// Resolves `name` against `current`; None when it is not one of our service
 /// instances. Returns the key plus the existing or a fresh instance.
-fn find_instance(
-    current: &HashMap<String, Instance>,
-    name: &str,
-) -> Option<(String, Instance)> {
+fn find_instance(current: &HashMap<String, Instance>, name: &str) -> Option<(String, Instance)> {
     let key = instance_key_of(name)?;
     let instance_name_len = name.len().saturating_sub(PLAINAPP_SERVICE_TYPE.len() + 1);
     let instance_name = name[..instance_name_len].to_string();
@@ -691,7 +690,9 @@ mod tests {
 
     fn test_instance(fqdn: &str) -> (String, Instance) {
         let key = fqdn.to_lowercase();
-        let name = fqdn.strip_suffix(&format!(".{PLAINAPP_SERVICE_TYPE}")).unwrap();
+        let name = fqdn
+            .strip_suffix(&format!(".{PLAINAPP_SERVICE_TYPE}"))
+            .unwrap();
         (key.clone(), Instance::new(key, name.to_string()))
     }
 
@@ -821,7 +822,10 @@ mod tests {
         let inst = state.instances.get(key).expect("instance");
         let mut ips: Vec<String> = inst.ips.iter().cloned().collect();
         ips.sort();
-        assert_eq!(ips, vec!["10.8.0.2".to_string(), "192.168.1.10".to_string()]);
+        assert_eq!(
+            ips,
+            vec!["10.8.0.2".to_string(), "192.168.1.10".to_string()]
+        );
     }
 
     // ── goodbye_instance_keys (RFC 6762 §8.4) ─────────────────────────────
@@ -862,14 +866,16 @@ mod tests {
                 .insert("plainapp-abc.local".to_string(), key.to_string());
             state.srv_txt_queried_at.insert(key.to_string(), 42);
         }
-        let goodbye = service_response_builder::build_goodbye(&test_service(
-            "Pixel 7 Pro",
-            SERVICE_TYPE,
-        ));
+        let goodbye =
+            service_response_builder::build_goodbye(&test_service("Pixel 7 Pro", SERVICE_TYPE));
         handle_packet(&browser.inner, &goodbye, "192.0.2.1");
         let state = browser.inner.state.lock().unwrap();
         assert!(!state.instances.contains_key(key));
-        assert!(!state.hostname_to_instance.contains_key("plainapp-abc.local"));
+        assert!(
+            !state
+                .hostname_to_instance
+                .contains_key("plainapp-abc.local")
+        );
         assert!(!state.srv_txt_queried_at.contains_key(key));
     }
 
@@ -917,36 +923,28 @@ mod tests {
             &packet_codec::ip_to_bytes("192.168.1.10"),
         );
         handle_packet(&browser.inner, &out, "192.0.2.1");
-        assert!(browser
-            .inner
-            .state
-            .lock()
-            .unwrap()
-            .instances
-            .contains_key(key));
+        assert!(
+            browser
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .instances
+                .contains_key(key)
+        );
     }
 
     #[test]
     fn self_looped_packet_is_ignored() {
         let response = {
             let query = packet_codec::build_query("p9.local", TYPE_A, false);
-            packet_codec::build_response_if_match(
-                &query,
-                "p9.local",
-                &["192.168.1.20".to_string()],
-            )
-            .expect("a-record response")
+            packet_codec::build_response_if_match(&query, "p9.local", &["192.168.1.20".to_string()])
+                .expect("a-record response")
         };
-        let remote = MdnsServiceBrowser::new(
-            String::new(),
-            Arc::new(RwLock::new(String::new())),
-            |_| {},
-        );
-        let local = MdnsServiceBrowser::new(
-            String::new(),
-            Arc::new(RwLock::new(String::new())),
-            |_| {},
-        );
+        let remote =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
+        let local =
+            MdnsServiceBrowser::new(String::new(), Arc::new(RwLock::new(String::new())), |_| {});
         let seed = |browser: &MdnsServiceBrowser| {
             let key = "p9._plainapp._tcp.local";
             let mut state = browser.inner.state.lock().unwrap();
@@ -962,26 +960,30 @@ mod tests {
         seed(&local);
 
         handle_packet(&remote.inner, &response.bytes, "192.0.2.1");
-        assert!(remote
-            .inner
-            .state
-            .lock()
-            .unwrap()
-            .instances
-            .values()
-            .all(|i| i.ips.contains(&"192.168.1.20".to_string())));
-
-        if let Some(ip) = local_ip_sender() {
-            handle_packet(&local.inner, &response.bytes, &ip);
-            assert!(local
+        assert!(
+            remote
                 .inner
                 .state
                 .lock()
                 .unwrap()
                 .instances
                 .values()
-                .all(|i| i.ips.contains(&"192.168.1.10".to_string())
-                    && !i.ips.contains(&"192.168.1.20".to_string())));
+                .all(|i| i.ips.contains(&"192.168.1.20".to_string()))
+        );
+
+        if let Some(ip) = local_ip_sender() {
+            handle_packet(&local.inner, &response.bytes, &ip);
+            assert!(
+                local
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .instances
+                    .values()
+                    .all(|i| i.ips.contains(&"192.168.1.10".to_string())
+                        && !i.ips.contains(&"192.168.1.20".to_string()))
+            );
         }
     }
 

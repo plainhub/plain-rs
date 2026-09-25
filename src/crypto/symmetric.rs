@@ -1,6 +1,6 @@
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce as ChaNonce, XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
 };
 
 use crate::utils::base64::base64_decode;

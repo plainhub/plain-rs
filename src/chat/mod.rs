@@ -19,5 +19,6 @@
 //! plug in through small traits.
 
 pub mod channel;
+pub mod db;
 pub mod enums;
 pub mod pairing;

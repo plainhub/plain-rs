@@ -46,7 +46,9 @@ fn encode(uuid_bytes: &[u8]) -> String {
     if encoded.len() < 22 {
         let pad = ALPHABET[0] as char;
         let mut s = String::new();
-        for _ in 0..(22 - encoded.len()) { s.push(pad); }
+        for _ in 0..(22 - encoded.len()) {
+            s.push(pad);
+        }
         s.push_str(&encoded);
         encoded = s;
     }
@@ -74,7 +76,10 @@ mod tests {
         for _ in 0..50 {
             let id = new_id();
             for c in id.chars() {
-                assert!(!matches!(c, '0' | 'O' | '1' | 'I' | 'l'), "ambiguous char in {id}");
+                assert!(
+                    !matches!(c, '0' | 'O' | '1' | 'I' | 'l'),
+                    "ambiguous char in {id}"
+                );
             }
         }
     }

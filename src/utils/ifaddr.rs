@@ -37,7 +37,10 @@ pub fn list() -> Vec<Ifv4> {
     // `freeifaddrs`. We always do.
     let rc = unsafe { libc::getifaddrs(&mut raw) };
     if rc != 0 {
-        log::warn!("[ifaddr] getifaddrs failed: {}", std::io::Error::last_os_error());
+        log::warn!(
+            "[ifaddr] getifaddrs failed: {}",
+            std::io::Error::last_os_error()
+        );
         return out;
     }
     // SAFETY: `raw` is a valid pointer to a linked list (or NULL on
@@ -59,14 +62,20 @@ pub fn list() -> Vec<Ifv4> {
         {
             // SAFETY: addr is non-null and sa_family is AF_INET, so
             // casting to `sockaddr_in` is sound.
-            let ip_u32 = u32::from_be(unsafe { (*(addr as *const libc::sockaddr_in)).sin_addr.s_addr });
+            let ip_u32 =
+                u32::from_be(unsafe { (*(addr as *const libc::sockaddr_in)).sin_addr.s_addr });
             let mask = if netmask.is_null() {
                 None
             } else {
-                let m = u32::from_be(unsafe { (*(netmask as *const libc::sockaddr_in)).sin_addr.s_addr });
+                let m = u32::from_be(unsafe {
+                    (*(netmask as *const libc::sockaddr_in)).sin_addr.s_addr
+                });
                 Some(Ipv4Addr::from(m))
             };
-            out.push(Ifv4 { ip: Ipv4Addr::from(ip_u32), netmask: mask });
+            out.push(Ifv4 {
+                ip: Ipv4Addr::from(ip_u32),
+                netmask: mask,
+            });
         }
         cur = NonNull::new(ifa.ifa_next);
     }

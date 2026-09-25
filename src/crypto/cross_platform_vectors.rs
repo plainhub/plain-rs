@@ -203,8 +203,7 @@ fn xchacha20_decrypt_plain_app_ciphertext() {
     blob.extend_from_slice(&nonce);
     blob.extend_from_slice(&ciphertext);
 
-    let plaintext = super::xchacha_decrypt_raw(&key, &blob)
-        .expect("decryption must succeed");
+    let plaintext = super::xchacha_decrypt_raw(&key, &blob).expect("decryption must succeed");
     assert_eq!(
         plaintext,
         v.plaintext.as_bytes(),
@@ -221,8 +220,7 @@ fn xchacha20_re_encrypt_produces_same_ciphertext() {
 
     // Use the raw chacha20poly1305 crate directly to encrypt with the fixed nonce.
     use chacha20poly1305::aead::{Aead, KeyInit};
-    let cipher = chacha20poly1305::XChaCha20Poly1305::new_from_slice(&key)
-        .expect("invalid key");
+    let cipher = chacha20poly1305::XChaCha20Poly1305::new_from_slice(&key).expect("invalid key");
     let nonce_obj = chacha20poly1305::XNonce::from_slice(&nonce);
     let re_encrypted = cipher
         .encrypt(nonce_obj, v.plaintext.as_bytes())
@@ -292,7 +290,10 @@ fn hex_encodes_full_byte_range() {
     let all_bytes: Vec<u8> = (0..=255u8).collect();
     let hex = bytes_to_hex(&all_bytes);
     assert_eq!(hex.len(), 512);
-    assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(
+        hex.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
     assert_eq!(&hex[0..2], "00");
     assert_eq!(&hex[510..512], "ff");
 }

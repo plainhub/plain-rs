@@ -62,7 +62,8 @@ fn signature_tamper_fails() {
     let pub_key_b64 = base64_encode(&vk_bytes);
 
     // Tamper with version in the payload.
-    let tampered = channel_message_payload("ch_4", 99, ChannelSystemMessageAction::Invite, "peer_c");
+    let tampered =
+        channel_message_payload("ch_4", 99, ChannelSystemMessageAction::Invite, "peer_c");
     assert!(
         !ed25519_verify(&pub_key_b64, tampered.as_bytes(), &sig),
         "tampered payload should fail verification"
@@ -93,7 +94,10 @@ fn channel_invite_serializes_to_camelcase_wire() {
         channel_name: "Channel".to_string(),
         key: "a2V5".to_string(),
         owner: "owner-1".to_string(),
-        members: vec![ChannelMember::new("owner-1"), ChannelMember::pending("peer-1")],
+        members: vec![
+            ChannelMember::new("owner-1"),
+            ChannelMember::pending("peer-1"),
+        ],
         member_peers: vec![MemberPeerInfo {
             id: "owner-1".to_string(),
             name: "Desktop".to_string(),
@@ -139,5 +143,8 @@ fn members_encode_decode_roundtrip() {
     );
     assert!(has_member(&roster, "a"));
     assert!(!has_member(&roster, "c"));
-    assert_eq!(find_member(&roster, "b").map(|m| m.peer_id.as_str()), Some("b"));
+    assert_eq!(
+        find_member(&roster, "b").map(|m| m.peer_id.as_str()),
+        Some("b")
+    );
 }

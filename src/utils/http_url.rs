@@ -122,8 +122,7 @@ pub fn join(base: &str, reference: &str) -> Option<String> {
         Some(p) => {
             // Default ports for schemes (80 for http, 443 for https) are
             // dropped — the URL stays canonical.
-            if (base_url.scheme == "http" && p == 80) || (base_url.scheme == "https" && p == 443)
-            {
+            if (base_url.scheme == "http" && p == 80) || (base_url.scheme == "https" && p == 443) {
                 base_url.host.clone()
             } else {
                 format!("{}:{}", base_url.host, p)
@@ -206,7 +205,11 @@ pub fn parse_http_url(input: &str) -> Option<ParsedHttpUrl> {
         None => query,
     };
     // Path must start with '/'.
-    let path = if path.starts_with('/') { path.to_string() } else { return None };
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        return None;
+    };
     Some(ParsedHttpUrl {
         scheme: scheme.to_ascii_lowercase(),
         host: host.to_ascii_lowercase(),
@@ -249,6 +252,19 @@ fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
             }
         }
     }
+}
+
+/// Build `scheme://host[:port]path`, omitting the port when it is the
+/// scheme's default (80 for http/ws, 443 for https/wss).
+pub fn build_url(scheme: &str, host: &str, port: u16, path: &str) -> String {
+    let omit_port = ((scheme == "http" || scheme == "ws") && port == 80)
+        || ((scheme == "https" || scheme == "wss") && port == 443);
+    let port_part = if omit_port {
+        String::new()
+    } else {
+        format!(":{port}")
+    };
+    format!("{scheme}://{host}{port_part}{path}")
 }
 
 #[cfg(test)]
@@ -325,6 +341,30 @@ mod tests {
         assert_eq!(
             join("http://e.com/a/b", "../c/d").as_deref(),
             Some("http://e.com/c/d")
+        );
+    }
+
+    #[test]
+    fn build_url_omits_default_ports() {
+        assert_eq!(
+            build_url("http", "example.com", 80, ""),
+            "http://example.com"
+        );
+        assert_eq!(
+            build_url("https", "example.com", 443, ""),
+            "https://example.com"
+        );
+        assert_eq!(
+            build_url("ws", "example.com", 80, "/x"),
+            "ws://example.com/x"
+        );
+    }
+
+    #[test]
+    fn build_url_keeps_non_default_ports() {
+        assert_eq!(
+            build_url("https", "203.0.113.5", 8443, "/fs?id=1"),
+            "https://203.0.113.5:8443/fs?id=1"
         );
     }
 }

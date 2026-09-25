@@ -273,7 +273,11 @@ fn sync_memberships(socket: &std::net::UdpSocket, candidates: &[MdnsIface]) -> b
             }
         }
     }
-    let success: HashSet<String> = desired.intersection(&joined).cloned().chain(fresh).collect();
+    let success: HashSet<String> = desired
+        .intersection(&joined)
+        .cloned()
+        .chain(fresh)
+        .collect();
     *joined_ifaces().lock().unwrap() = Some(success.clone());
     if success.is_empty() {
         // All per-interface joins failed (EINVAL on some kernels) — fall back
@@ -328,10 +332,12 @@ fn ensure_reannounce() {
     }
     std::thread::Builder::new()
         .name("plain-mdns-announce".to_string())
-        .spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(REANNOUNCE_MS));
-            if INNER.service_info.read().unwrap().is_some() {
-                broadcast_service();
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(REANNOUNCE_MS));
+                if INNER.service_info.read().unwrap().is_some() {
+                    broadcast_service();
+                }
             }
         })
         .ok();
@@ -530,7 +536,10 @@ fn create_ipv6_socket() -> io::Result<std::net::UdpSocket> {
 /// so a network change only adds memberships. Best-effort: failure never tears
 /// down the IPv4 path.
 fn sync_ipv6_memberships(socket: &std::net::UdpSocket) -> bool {
-    let desired: Vec<u32> = candidate_ipv6_interfaces().iter().map(|(_, i)| *i).collect();
+    let desired: Vec<u32> = candidate_ipv6_interfaces()
+        .iter()
+        .map(|(_, i)| *i)
+        .collect();
     let joined = ipv6_joined().lock().unwrap().clone().unwrap_or_default();
     let mut fresh = HashSet::new();
     for index in &desired {
@@ -874,11 +883,14 @@ fn find_response_iface(sender_ip: &str, candidates: &[MdnsIface]) -> Option<(Mdn
         let a = u32::from(iface.ip) & u32::from(iface.netmask);
         let b = u32::from(sender) & u32::from(iface.netmask);
         if a == b {
-            return Some((MdnsIface {
-                name: iface.name.clone(),
-                ip: iface.ip,
-                netmask: iface.netmask,
-            }, iface.ip.to_string()));
+            return Some((
+                MdnsIface {
+                    name: iface.name.clone(),
+                    ip: iface.ip,
+                    netmask: iface.netmask,
+                },
+                iface.ip.to_string(),
+            ));
         }
     }
     None
@@ -918,11 +930,7 @@ pub fn get_best_ip(ips: &[String]) -> String {
 }
 
 fn joined_iface_set() -> HashSet<String> {
-    joined_ifaces()
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_default()
+    joined_ifaces().lock().unwrap().clone().unwrap_or_default()
 }
 
 fn joined_iface_list() -> Vec<String> {
@@ -961,8 +969,7 @@ mod tests {
             ip: "192.168.1.5".parse().unwrap(),
             netmask: "255.255.255.0".parse().unwrap(),
         }];
-        let (iface, ip) =
-            find_response_iface("192.168.1.100", &candidates).expect("same subnet");
+        let (iface, ip) = find_response_iface("192.168.1.100", &candidates).expect("same subnet");
         assert_eq!(iface.name, "en0");
         assert_eq!(ip, "192.168.1.5");
         assert!(find_response_iface("10.0.0.1", &candidates).is_none());

@@ -155,7 +155,10 @@ fn webp(b: &[u8]) -> Option<(i32, i32)> {
             let i = 16 + 1;
             let d = &b[i..i + 4];
             let w = 1 + (((d[1] & 0x3F) as i32) << 8 | d[0] as i32);
-            let h = 1 + ((((d[3] & 0x0F) as i32) << 10) | ((d[2] as i32) << 2) | ((d[1] & 0xC0) as i32) >> 6);
+            let h = 1
+                + ((((d[3] & 0x0F) as i32) << 10)
+                    | ((d[2] as i32) << 2)
+                    | ((d[1] & 0xC0) as i32) >> 6);
             Some((w, h))
         }
         b"VP8X" => {
@@ -239,12 +242,20 @@ fn parse_tiff_header(tiff: &[u8]) -> Option<(bool, u32)> {
 
 fn tiff_read_u16(tiff: &[u8], off: usize, le: bool) -> Option<u16> {
     let b = tiff.get(off..off + 2)?;
-    Some(if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) })
+    Some(if le {
+        u16::from_le_bytes([b[0], b[1]])
+    } else {
+        u16::from_be_bytes([b[0], b[1]])
+    })
 }
 
 fn tiff_read_u32(tiff: &[u8], off: usize, le: bool) -> Option<u32> {
     let b = tiff.get(off..off + 4)?;
-    Some(if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) })
+    Some(if le {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    } else {
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    })
 }
 
 /// Decode a SHORT (type 3) or LONG (type 4) IFD value that fits inline in
@@ -323,7 +334,11 @@ fn tiff_find_dms_and_ref(
                 let off = tiff_read_u32(tiff, entry + 8, le)? as usize;
                 tiff.get(off..off + count_bytes)?
             };
-            ref_marker = Some(String::from_utf8_lossy(buf).trim_end_matches('\0').to_string());
+            ref_marker = Some(
+                String::from_utf8_lossy(buf)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            );
         }
         if dms.is_some() && ref_marker.is_some() {
             break;
@@ -332,7 +347,12 @@ fn tiff_find_dms_and_ref(
     Some((dms?, ref_marker.unwrap_or_default()))
 }
 
-fn tiff_read_rationals(tiff: &[u8], off: usize, le: bool, count: usize) -> Option<Vec<TiffRational>> {
+fn tiff_read_rationals(
+    tiff: &[u8],
+    off: usize,
+    le: bool,
+    count: usize,
+) -> Option<Vec<TiffRational>> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let p = off + i * 8;
@@ -435,7 +455,9 @@ mod tests {
     #[test]
     fn jpeg_dimensions_parse() {
         // FF D8 | FF C0 | seg(2) | precis(1) | h(2) | w(2)
-        let b = [0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x20, 0x01, 0x00];
+        let b = [
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x20, 0x01, 0x00,
+        ];
         assert_eq!(dimensions(&b), Some((256, 32)));
     }
 
@@ -479,7 +501,11 @@ mod tests {
 
     /// Build a minimal little-endian TIFF: header + one IFD with `entries`
     /// (tag, type, count, inline value) and room for extra data at `extra_off`.
-    fn build_le_tiff(entries: &[(u16, u16, u32, u32)], extra: &[(usize, Vec<u8>)], total: usize) -> Vec<u8> {
+    fn build_le_tiff(
+        entries: &[(u16, u16, u32, u32)],
+        extra: &[(usize, Vec<u8>)],
+        total: usize,
+    ) -> Vec<u8> {
         let mut b = vec![0u8; total];
         b[0..2].copy_from_slice(b"II");
         b[2..4].copy_from_slice(&0x2Au16.to_le_bytes());
@@ -570,7 +596,11 @@ mod tests {
         // IFD0 with a single GPS-info pointer (0x8825, LONG) → 46.
         let tiff = build_le_tiff(
             &[(0x8825, 4, 1, 46)],
-            &[(46, gps_ifd), (lat_off, rationals), (lon_off, lon_rationals)],
+            &[
+                (46, gps_ifd),
+                (lat_off, rationals),
+                (lon_off, lon_rationals),
+            ],
             256,
         );
 

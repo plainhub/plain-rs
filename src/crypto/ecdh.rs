@@ -1,8 +1,4 @@
-use p256::{
-    ecdh::EphemeralSecret,
-    pkcs8::DecodePublicKey,
-    PublicKey as P256PublicKey,
-};
+use p256::{PublicKey as P256PublicKey, ecdh::EphemeralSecret, pkcs8::DecodePublicKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 

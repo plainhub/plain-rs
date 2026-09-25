@@ -120,7 +120,10 @@ mod tests {
 
     #[test]
     fn parse_range_clamps_end_to_file_size() {
-        assert_eq!(parse_range_header("bytes=900-2000", 1000), Partial(900, 999));
+        assert_eq!(
+            parse_range_header("bytes=900-2000", 1000),
+            Partial(900, 999)
+        );
     }
 
     #[test]

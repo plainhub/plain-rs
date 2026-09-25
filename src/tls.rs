@@ -10,7 +10,7 @@
 use std::io;
 use std::path::Path;
 
-use rcgen::{generate_simple_self_signed, CertifiedKey};
+use rcgen::{CertifiedKey, generate_simple_self_signed};
 
 /// Ensure a self-signed certificate + key exist at `cert_path` / `key_path`.
 /// If both files exist they are returned as-is; otherwise a new self-signed
@@ -31,7 +31,10 @@ pub fn ensure_self_signed_pem(
         return Ok((cert_pem, key_pem));
     }
 
-    log::info!("tls: generating new self-signed certificate in {}", cert_path.display());
+    log::info!(
+        "tls: generating new self-signed certificate in {}",
+        cert_path.display()
+    );
     // Create the parent dir when the cert path carries one (tests use
     // bare file names in flat temp dirs).
     let dir = cert_path.parent().filter(|d| !d.as_os_str().is_empty());

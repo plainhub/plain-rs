@@ -3,8 +3,8 @@ name = "plain-rs"
 version = "0.1.0"
 description = "Shared Rust primitives for the Plain* projects: crypto (ECDH P-256, Ed25519, XChaCha20-Poly1305) and utils (base64, hex, mime, query, http, http_url, short_uuid, shortid, hostname, ifaddr, async_read_stream, hash)"
 authors = ["iSmartCoding"]
-edition = "2021"
-rust-version = "1.74"
+edition = "2024"
+rust-version = "1.96"
 
 [lib]
 name = "plain_rs"

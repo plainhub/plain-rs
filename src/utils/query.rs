@@ -164,7 +164,10 @@ mod tests {
 
     #[test]
     fn query_get_decodes_value() {
-        assert_eq!(query_get("/x?cid=abc%20def", "cid").as_deref(), Some("abc def"));
+        assert_eq!(
+            query_get("/x?cid=abc%20def", "cid").as_deref(),
+            Some("abc def")
+        );
     }
 
     #[test]

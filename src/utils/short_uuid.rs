@@ -37,7 +37,10 @@ mod tests {
     fn short_uuid_is_non_empty_and_base36() {
         let id = short_uuid();
         assert!(!id.is_empty());
-        assert!(id.chars().all(|c| c.is_ascii_digit() || (c.is_ascii_lowercase())));
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_digit() || (c.is_ascii_lowercase()))
+        );
     }
 
     #[test]

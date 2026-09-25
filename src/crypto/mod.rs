@@ -54,9 +54,10 @@ mod tests {
         let t = gen_token();
         assert_eq!(t.len(), 44);
         assert!(t.ends_with('='));
-        assert!(t
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
         assert_ne!(t, gen_token());
     }
 
