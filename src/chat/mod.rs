@@ -18,7 +18,10 @@
 //! discovery wiring, link-preview scraping) stay in each consumer and
 //! plug in through small traits.
 
+pub mod app_file_store;
+pub mod cacher;
 pub mod channel;
+pub mod content;
 pub mod db;
 pub mod enums;
 pub mod pairing;
