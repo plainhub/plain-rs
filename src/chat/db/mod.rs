@@ -207,67 +207,23 @@ impl ChatDb {
     /// vec when the table is missing.
     /// Used by debug GraphQL resolvers (db_table_columns).
     pub fn table_columns(&self, table: &str) -> Vec<TableColumnMeta> {
-        self.with_conn(|conn| {
-            let mut stmt = match conn.prepare(&format!("PRAGMA table_info(`{table}`)")) {
-                Ok(s) => s,
-                Err(_) => return vec![],
-            };
-            stmt.query_map([], |row| {
-                let default_value: Option<rusqlite::types::Value> = row.get(4)?;
-                Ok(TableColumnMeta {
-                    name: row.get(1)?,
-                    data_type: row.get(2)?,
-                    not_null: row.get::<_, i64>(3)? != 0,
-                    default_value: default_value.map(value_to_string),
-                    primary_key: row.get::<_, i64>(5)? > 0,
-                })
-            })
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default()
-        })
+        self.with_conn(|conn| crate::sqlite_browse::table_columns(conn, table))
     }
 
-    /// Return the primary key column name for `table`, or `"id"` as a
-    /// fallback when the table is missing or has no declared primary key.
+    /// Return the primary key column name for `table` (first column of a
+    /// composite key), or `"id"` as a fallback when the table is missing
+    /// or has no declared primary key.
     /// Used by debug GraphQL resolvers (db_table_info, delete_db_table_rows).
     pub fn primary_key_column(&self, table: &str) -> String {
         const FALLBACK: &str = "id";
         self.with_conn(|conn| {
-            let mut stmt = match conn.prepare(&format!("PRAGMA table_info(`{table}`)")) {
-                Ok(s) => s,
-                Err(_) => return FALLBACK.to_string(),
-            };
-            stmt.query_map([], |row| {
-                let name: String = row.get(1)?;
-                let pk: i64 = row.get(5)?;
-                Ok((name, pk))
-            })
-            .ok()
-            .and_then(|rows| rows.flatten().find(|(_, pk)| *pk > 0).map(|(name, _)| name))
-            .unwrap_or_else(|| FALLBACK.to_string())
+            crate::sqlite_browse::primary_key_column(conn, table)
+                .unwrap_or_else(|| FALLBACK.to_string())
         })
     }
 }
 
-/// One column of a table, as reported by `PRAGMA table_info` — the row
-/// shape behind the debug `dbTableColumns` GraphQL field.
-pub struct TableColumnMeta {
-    pub name: String,
-    pub data_type: String,
-    pub not_null: bool,
-    pub default_value: Option<String>,
-    pub primary_key: bool,
-}
-
-fn value_to_string(value: rusqlite::types::Value) -> String {
-    match value {
-        rusqlite::types::Value::Integer(n) => n.to_string(),
-        rusqlite::types::Value::Real(f) => f.to_string(),
-        rusqlite::types::Value::Text(s) => s,
-        rusqlite::types::Value::Blob(b) => crate::utils::hex::bytes_to_hex(&b),
-        rusqlite::types::Value::Null => String::new(),
-    }
-}
+pub use crate::sqlite_browse::TableColumnMeta;
 
 #[cfg(test)]
 #[path = "../../../tests/unit/chat/db/mod.rs"]

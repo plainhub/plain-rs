@@ -14,12 +14,17 @@ name = "plain_rs"
 # extracted from plain-desktop's port of the plain-app chat stack.
 # Desktop and plain-nas both enable this; consumers without chat skip
 # the rusqlite build entirely.
-chat = ["dep:serde_json", "dep:rusqlite", "tokio/sync", "tokio/rt", "tokio/fs", "tokio/time"]
+chat = ["dep:serde_json", "dep:rusqlite", "sqlite_browse", "tokio/sync", "tokio/rt", "tokio/fs", "tokio/time"]
 # Shared user-library domain (SQLite storage): audio playback queue /
 # playlists / play history, tags + tag relations, favorite folders.
 # Ported from plain-nas's fjall implementations so NAS and desktop run
 # identical behavior. Consumers without a library skip it entirely.
 library = ["dep:rusqlite"]
+# SQLite table browsing for developer/debug UIs (the
+# /developer/database page): list tables, count + page rows as JSON,
+# PRAGMA column metadata, delete/insert rows. Shared by plain-nas
+# (chat.db + library.db) and plain-desktop (local db) devtools surfaces.
+sqlite_browse = ["dep:rusqlite", "dep:serde_json"]
 
 [dependencies]
 chacha20poly1305 = "0.10"
