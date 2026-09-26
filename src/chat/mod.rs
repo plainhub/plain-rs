@@ -10,7 +10,7 @@
 //!   signature payloads.
 //! - [`db`] — the SQLite storage layer, same schema as plain-app's
 //!   Room DB (`local_chat.db`: chats / chat_channels / peers /
-//!   nearby_device_cache / app_files).
+//!   nearby_device_cache / app_files / bookmarks / bookmark_groups).
 //! - files/cacher/service — content-addressed attachments, the
 //!   latest-chat cache, and the send/receive service.
 //!
