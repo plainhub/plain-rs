@@ -3,6 +3,8 @@ pub mod chat;
 pub mod crypto;
 #[cfg(feature = "library")]
 pub mod library;
+#[cfg(feature = "local_api")]
+pub mod local_api;
 pub mod mdns;
 #[cfg(feature = "sqlite_browse")]
 pub mod sqlite_browse;

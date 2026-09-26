@@ -1,5 +1,6 @@
 pub mod async_read_stream;
 pub mod base64;
+pub mod build_url;
 pub mod dbtime;
 pub mod hash;
 pub mod hex;
