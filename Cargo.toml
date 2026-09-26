@@ -15,6 +15,11 @@ name = "plain_rs"
 # Desktop and plain-nas both enable this; consumers without chat skip
 # the rusqlite build entirely.
 chat = ["dep:serde_json", "dep:rusqlite", "tokio/sync", "tokio/rt", "tokio/fs", "tokio/time"]
+# Shared user-library domain (SQLite storage): audio playback queue /
+# playlists / play history, tags + tag relations, favorite folders.
+# Ported from plain-nas's fjall implementations so NAS and desktop run
+# identical behavior. Consumers without a library skip it entirely.
+library = ["dep:rusqlite"]
 
 [dependencies]
 chacha20poly1305 = "0.10"

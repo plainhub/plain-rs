@@ -1,5 +1,6 @@
 pub mod async_read_stream;
 pub mod base64;
+pub mod dbtime;
 pub mod hash;
 pub mod hex;
 pub mod hostname;
@@ -9,6 +10,7 @@ pub mod ifaddr;
 pub mod image_dimensions;
 pub mod mime;
 pub mod query;
+pub mod search_dsl;
 pub mod short_uuid;
 pub mod shortid;
 pub mod unique_path;

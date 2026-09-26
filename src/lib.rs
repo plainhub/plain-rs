@@ -1,6 +1,8 @@
 #[cfg(feature = "chat")]
 pub mod chat;
 pub mod crypto;
+#[cfg(feature = "library")]
+pub mod library;
 pub mod mdns;
 pub mod tls;
 pub mod utils;

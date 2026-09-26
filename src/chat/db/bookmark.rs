@@ -95,7 +95,7 @@ const BOOKMARK_COLUMNS: &str = "id,url,title,favicon_path,group_id,pinned,click_
 pub fn get_bookmarks(db: &ChatDb) -> Vec<DBookmark> {
     db.with_conn(|conn| {
         let mut stmt = match conn.prepare(&format!(
-            "SELECT {BOOKMARK_COLUMNS} FROM bookmarks ORDER BY sort_order ASC, created_at ASC"
+            "SELECT {BOOKMARK_COLUMNS} FROM bookmarks ORDER BY pinned DESC, sort_order ASC, created_at ASC"
         )) {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -121,7 +121,7 @@ pub fn get_bookmark_by_id(db: &ChatDb, id: &str) -> Option<DBookmark> {
 pub fn get_bookmarks_by_group_id(db: &ChatDb, group_id: &str) -> Vec<DBookmark> {
     db.with_conn(|conn| {
         let mut stmt = match conn.prepare(&format!(
-            "SELECT {BOOKMARK_COLUMNS} FROM bookmarks WHERE group_id=? ORDER BY sort_order ASC, created_at ASC"
+            "SELECT {BOOKMARK_COLUMNS} FROM bookmarks WHERE group_id=? ORDER BY pinned DESC, sort_order ASC, created_at ASC"
         )) {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -193,7 +193,7 @@ pub fn delete_bookmarks(db: &ChatDb, ids: &[String]) -> i32 {
 pub fn get_bookmark_groups(db: &ChatDb) -> Vec<DBookmarkGroup> {
     db.with_conn(|conn| {
         let mut stmt = match conn.prepare(
-            "SELECT id,name,collapsed,sort_order,created_at,updated_at FROM bookmark_groups ORDER BY sort_order ASC, name ASC",
+            "SELECT id,name,collapsed,sort_order,created_at,updated_at FROM bookmark_groups ORDER BY sort_order ASC, created_at ASC",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
