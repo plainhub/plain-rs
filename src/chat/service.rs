@@ -437,6 +437,7 @@ impl<T: PeerTransport + 'static> ChatService<T> {
         let peer_key_cache = self.peer_key_cache.clone();
         let channel_key_cache = self.channel_key_cache.clone();
         let transport = self.transport.clone();
+        let hooks = self.hooks.clone();
 
         tokio::spawn(async move {
             {
@@ -465,7 +466,9 @@ impl<T: PeerTransport + 'static> ChatService<T> {
                     (s, d)
                 }
                 SendResult::NoLeader | SendResult::LeaderPeerMissing(()) => {
-                    // No reachable leader/member means stale peer addresses.
+                    // No reachable leader/member means stale peer addresses —
+                    // kick a re-browse so peers' IP/port refresh.
+                    hooks.rebrowse_peers();
                     (ChatStatus::Failed, build_no_leader_status_data())
                 }
             };

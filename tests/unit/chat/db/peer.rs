@@ -58,7 +58,9 @@ fn login_peer_creates_unpaired_peer_with_token() {
         DeviceType::Phone,
         "tok1",
         "sig1",
-    );
+        "",
+    )
+    .expect("login peer");
 
     let peer = db.get_peer_by_id("p1").expect("login creates peer");
     assert_eq!(peer.status, PeerStatus::Unpaired);
@@ -82,13 +84,37 @@ fn login_peer_refreshes_existing_row_and_keeps_pairing_state() {
         DeviceType::Phone,
         "tok2",
         "",
-    );
+        "",
+    )
+    .expect("refresh login peer");
 
     let peer = db.get_peer_by_id("p1").expect("peer still exists");
     assert_eq!(peer.status, PeerStatus::Paired);
     assert_eq!(peer.key, "chat-key");
     assert_eq!(peer.token, "tok2");
     assert_eq!(peer.ip, "203.0.113.20");
+}
+
+#[test]
+fn login_peer_with_chat_key_creates_paired_peer_with_token() {
+    let db = ChatDb::open(&unique_tmp_dir("login-chat").join("local_chat.db")).expect("open db");
+    db.login_peer(
+        "p1",
+        "Pixel 9",
+        "203.0.113.10",
+        8443,
+        DeviceType::Phone,
+        "token",
+        "phone-signature-key",
+        "chat-key",
+    )
+    .expect("login and pair peer");
+
+    let peer = db.get_peer_by_id("p1").expect("paired peer");
+    assert_eq!(peer.status, PeerStatus::Paired);
+    assert_eq!(peer.key, "chat-key");
+    assert_eq!(peer.token, "token");
+    assert_eq!(peer.public_key, "phone-signature-key");
 }
 
 #[test]
@@ -102,7 +128,9 @@ fn logout_peer_clears_token_and_drops_from_login_list() {
         DeviceType::Phone,
         "tok1",
         "sig1",
-    );
+        "",
+    )
+    .expect("login peer");
     assert_eq!(db.get_login_peers().len(), 1);
 
     db.logout_peer("p1");
@@ -125,7 +153,9 @@ fn update_peer_name_renames_only() {
         DeviceType::Phone,
         "tok1",
         "sig1",
-    );
+        "",
+    )
+    .expect("login peer");
 
     db.update_peer_name("p1", "new-name");
 

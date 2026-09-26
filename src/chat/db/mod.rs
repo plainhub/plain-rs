@@ -19,7 +19,7 @@ pub use channel::DChannel;
 pub use chat::DChat;
 pub use nearby_device::DNearbyDeviceCache;
 pub use peer::DPeer;
-pub use utils::{iso_from_unix_millis, now_iso, now_millis};
+pub use utils::{iso_from_unix_millis, now_iso, now_millis, short_id};
 
 // ---------------------------------------------------------------------------
 // ChatDb — SQLite wrapper
