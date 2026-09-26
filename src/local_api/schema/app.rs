@@ -120,7 +120,7 @@ impl AppMutation {
         // pairing wire traffic picks the rename up too.
         c.discover_manager.apply_device_rename(&name);
         c.chat.identity.set_device_name(&name);
-        c.shell.set_device_name(&name);
+        let _ = c.prefs.set("device_name", name.as_str());
         let _ = c.event_tx.send(WsEvent {
             event_type: WS_DEVICE_NAME_UPDATED,
             payload: json!(name).to_string(),

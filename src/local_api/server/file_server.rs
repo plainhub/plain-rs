@@ -1,68 +1,74 @@
-use std::io::SeekFrom;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+//! `/fs` — serve a file from the local data store.
+//!
+//! Mirrors `plain-app` `web/routes/FilesRoutes.kt::addFilesRoutes().get("/fs")`:
+//!   1. URL-decode the `id` query param.
+//!   2. Base64-decode + XChaCha20-decrypt with the local server's URL
+//!      token (this is how the web client delivers the path — see
+//!      `getFileId` in `lib/api/file.ts`).
+//!   3. Parse the decrypted payload: either a JSON object
+//!      `{"path":"…","mediaId":"…","name":"…"}` or a plain URI string
+//!      such as `fid:{sha256}.{ext}` / `app://…` / absolute path.
+//!   4. Resolve to a real on-disk path. For `fid:` the resolution is
+//!      `{data_dir}/files/{aa}/{bb}/{hash}.{ext}` — matches what
+//!      `app_file_store::import_file` writes.
+//!   5. Byte-range short-circuit (`?offset=…&length=…`) for BLE
+//!      transports — serves raw `application/octet-stream` bytes.
+//!   6. Otherwise stream the file body with RFC 5987
+//!      `Content-Disposition`, honoring HTTP `Range` headers (RFC 7233)
+//!      so browsers can seek media.
 
-use super::response::respond;
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::response::Response;
+use std::io::SeekFrom;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+use super::response::{cors_header_pairs, respond};
 use super::uri::{parse_decrypted_id, resolve_uri};
 use crate::base64_decode;
 use crate::local_api::context::AppCtx;
+use crate::local_api::server::ServerState;
 use crate::mime::mime_from_ext;
 use crate::query::parse_query;
+use crate::utils::async_read_stream::AsyncReadStream;
 use crate::utils::http::RangeParse;
 use crate::xchacha_decrypt;
 
-/// Serve a file via the local server's `/fs` endpoint.
-///
-/// Mirrors `plain-app` `web/routes/FilesRoutes.kt::addFilesRoutes().get("/fs")`:
-///   1. URL-decode the `id` query param.
-///   2. Base64-decode + XChaCha20-decrypt with the local server's URL
-///      token (this is how the web client delivers the path — see
-///      `getFileId` in `lib/api/file.ts`).
-///   3. Parse the decrypted payload: either a JSON object
-///      `{"path":"…","mediaId":"…","name":"…"}` or a plain URI string
-///      such as `fid:{sha256}.{ext}` / `app://…` / absolute path.
-///   4. Resolve to a real on-disk path. For `fid:` the resolution is
-///      `{data_dir}/files/{aa}/{bb}/{hash}.{ext}` — matches what
-///      `app_file_store::import_file` writes.
-///   5. Byte-range short-circuit (`?offset=…&length=…`) for BLE
-///      transports — serves raw `application/octet-stream` bytes.
-///   6. Otherwise stream the file body with RFC 5987
-///      `Content-Disposition`, honoring HTTP `Range` headers (RFC 7233)
-///      so browsers can seek media.
-pub async fn serve_file<W: AsyncWrite + Unpin>(
-    wr: &mut W,
-    query_str: &str,
-    range_header: &str,
-    ctx: &Arc<AppCtx>,
-) {
+pub async fn fs_handler(State(state): State<ServerState>, req: Request) -> Response {
+    let query_str = req.uri().query().unwrap_or("").to_string();
+    let range_header = req
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    serve_file(&query_str, &range_header, &state.ctx).await
+}
+
+pub async fn serve_file(query_str: &str, range_header: &str, ctx: &Arc<AppCtx>) -> Response {
     // 1. Parse query params.
     let params = parse_query(query_str);
     let id_encoded = match params.get("id") {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => {
-            respond(wr, 400, "Bad Request", b"missing id", "text/plain").await;
-            return;
-        }
+        _ => return respond(400, b"missing id".to_vec(), "text/plain"),
     };
 
     // 2. Decrypt the id.
     let id_bytes = base64_decode(&id_encoded);
     let Some(plaintext) = xchacha_decrypt(&ctx.token, &id_bytes) else {
-        respond(wr, 401, "Unauthorized", b"", "text/plain").await;
-        return;
+        return respond(401, Vec::new(), "text/plain");
     };
-    let plaintext = match std::str::from_utf8(&plaintext) {
-        Ok(s) => s.to_string(),
+    let plaintext = match String::from_utf8(plaintext) {
+        Ok(s) => s,
         Err(_) => {
-            respond(
-                &mut *wr,
+            return respond(
                 400,
-                "Bad Request",
-                b"decrypted id is not valid utf-8",
+                b"decrypted id is not valid utf-8".to_vec(),
                 "text/plain",
-            )
-            .await;
-            return;
+            );
         }
     };
 
@@ -75,14 +81,10 @@ pub async fn serve_file<W: AsyncWrite + Unpin>(
     // 5. Sanity-check the file is on disk and is a file.
     let metadata = match tokio::fs::metadata(&resolved).await {
         Ok(m) => m,
-        Err(_) => {
-            respond(wr, 404, "Not Found", b"", "text/plain").await;
-            return;
-        }
+        Err(_) => return respond(404, Vec::new(), "text/plain"),
     };
     if !metadata.is_file() {
-        respond(wr, 400, "Bad Request", b"not a file", "text/plain").await;
-        return;
+        return respond(400, b"not a file".to_vec(), "text/plain");
     }
     let file_size = metadata.len();
 
@@ -99,12 +101,10 @@ pub async fn serve_file<W: AsyncWrite + Unpin>(
     ) && len > 0
     {
         if off >= file_size {
-            respond(wr, 404, "Not Found", b"", "text/plain").await;
-            return;
+            return respond(404, Vec::new(), "text/plain");
         }
         let clamped = len.min(file_size - off);
-        serve_range_raw(wr, &resolved, off, clamped).await;
-        return;
+        return range_raw_response(&resolved, off, clamped).await;
     }
 
     // 7. Display filename + MIME + Content-Disposition (RFC 5987).
@@ -125,192 +125,138 @@ pub async fn serve_file<W: AsyncWrite + Unpin>(
     let disposition_kind = if is_download { "attachment" } else { "inline" };
     let disposition = crate::utils::http::content_disposition(disposition_kind, &display_name);
 
-    // 8. HTTP `Range` header (RFC 7233). Browsers use this for media
-    //    seeking; plain-app gets it implicitly via Ktor's `respondFile`,
-    //    the local server has to handle it explicitly. Only single-range
-    //    requests are honored; multi-range falls through to a full 200.
-    //    A syntactically valid but unsatisfiable range answers 416 with
+    // 8. HTTP `Range` header (RFC 7233). Only single-range requests are
+    //    honored; multi-range falls through to a full 200. A syntactically
+    //    valid but unsatisfiable range answers 416 with
     //    `content-range: bytes */<size>` (RFC 7233 §4.4), the same shape
     //    Ktor serves.
     match crate::utils::http::parse_range_header(range_header, file_size) {
         RangeParse::Partial(start, end) => {
-            serve_partial(wr, &resolved, start, end, file_size, mime, &disposition).await;
-            return;
+            return partial_response(&resolved, start, end, file_size, mime, &disposition).await;
         }
-        RangeParse::Unsatisfiable => {
-            serve_unsatisfiable_range(wr, file_size).await;
-            return;
-        }
+        RangeParse::Unsatisfiable => return unsatisfiable_range_response(file_size),
         RangeParse::Full => {}
     }
 
     // 9. Full response (200) with `accept-ranges: bytes` so clients know
     //    they can issue `Range` requests on subsequent calls.
-    let head = format!(
-        "HTTP/1.1 200 OK\r\n\
-         content-type: {mime}\r\n\
-         content-length: {file_size}\r\n\
-         content-disposition: {disposition}\r\n\
-         accept-ranges: bytes\r\n\
-         access-control-expose-headers: content-disposition, accept-ranges, content-range\r\n\
-         access-control-allow-origin: *\r\n\
-         access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
-         access-control-allow-headers: *\r\n\
-         connection: close\r\n\
-         \r\n"
-    );
-    if wr.write_all(head.as_bytes()).await.is_err() {
-        return;
-    }
-    stream_file(wr, &resolved, 0, file_size).await;
+    full_response(&resolved, file_size, mime, &disposition).await
 }
 
-/// Serve a raw byte range for BLE transport. Content-Type is
-/// `application/octet-stream` (matches plain-app), with no
-/// Content-Disposition and no Range negotiation — the caller has
-/// already validated `offset` / `length`.
-async fn serve_range_raw<W: AsyncWrite + Unpin>(
-    wr: &mut W,
-    path: &std::path::Path,
-    offset: u64,
-    length: u64,
-) {
-    let head = format!(
-        "HTTP/1.1 200 OK\r\n\
-         content-type: application/octet-stream\r\n\
-         content-length: {length}\r\n\
-         access-control-allow-origin: *\r\n\
-         access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
-         access-control-allow-headers: *\r\n\
-         connection: close\r\n\
-         \r\n"
-    );
-    if wr.write_all(head.as_bytes()).await.is_err() {
-        return;
-    }
-    stream_file(wr, path, offset, length).await;
+/// CORS + range-negotiation headers shared by every streaming variant.
+fn streaming_common_headers(
+    builder: axum::http::response::Builder,
+) -> axum::http::response::Builder {
+    builder.header("accept-ranges", "bytes").header(
+        "access-control-expose-headers",
+        "content-disposition, accept-ranges, content-range",
+    )
 }
 
-/// Serve a `206 Partial Content` response for an HTTP `Range` request.
-async fn serve_partial<W: AsyncWrite + Unpin>(
-    wr: &mut W,
-    path: &std::path::Path,
+/// Full `200` streaming response with the exact header set the
+/// hand-rolled server sent.
+pub async fn full_response(path: &Path, file_size: u64, mime: &str, disposition: &str) -> Response {
+    let reader = match open_seeking_reader(path, 0, file_size).await {
+        Ok(r) => r,
+        Err(_) => return respond(404, Vec::new(), "text/plain"),
+    };
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", mime)
+        .header("content-length", file_size)
+        .header("content-disposition", disposition);
+    builder = streaming_common_headers(builder);
+    builder = with_cors(builder);
+    builder
+        .body(Body::from_stream(AsyncReadStream::new(reader)))
+        .expect("static response")
+}
+
+/// `206 Partial Content` for an HTTP `Range` request.
+pub async fn partial_response(
+    path: &Path,
     start: u64,
     end: u64,
     file_size: u64,
     mime: &str,
     disposition: &str,
-) {
+) -> Response {
     let length = end - start + 1;
-    let head = format!(
-        "HTTP/1.1 206 Partial Content\r\n\
-         content-type: {mime}\r\n\
-         content-length: {length}\r\n\
-         content-range: bytes {start}-{end}/{file_size}\r\n\
-         content-disposition: {disposition}\r\n\
-         accept-ranges: bytes\r\n\
-         access-control-expose-headers: content-disposition, accept-ranges, content-range\r\n\
-         access-control-allow-origin: *\r\n\
-         access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
-         access-control-allow-headers: *\r\n\
-         connection: close\r\n\
-         \r\n"
-    );
-    if wr.write_all(head.as_bytes()).await.is_err() {
-        return;
-    }
-    stream_file(wr, path, start, length).await;
+    let reader = match open_seeking_reader(path, start, length).await {
+        Ok(r) => r,
+        Err(_) => return respond(404, Vec::new(), "text/plain"),
+    };
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header("content-type", mime)
+        .header("content-length", length)
+        .header("content-range", format!("bytes {start}-{end}/{file_size}"))
+        .header("content-disposition", disposition);
+    builder = streaming_common_headers(builder);
+    builder = with_cors(builder);
+    builder
+        .body(Body::from_stream(AsyncReadStream::new(reader)))
+        .expect("static response")
 }
 
-/// Serve a `416 Range Not Satisfiable` response (RFC 7233 §4.4) for a
-/// `Range` request no part of the representation can satisfy. The body
-/// is empty and `content-range` advertises the actual size so the client
-/// can recompute a valid range.
-async fn serve_unsatisfiable_range<W: AsyncWrite + Unpin>(wr: &mut W, file_size: u64) {
-    let head = format!(
-        "HTTP/1.1 416 Range Not Satisfiable\r\n\
-         content-length: 0\r\n\
-         content-range: bytes */{file_size}\r\n\
-         accept-ranges: bytes\r\n\
-         access-control-expose-headers: content-disposition, accept-ranges, content-range\r\n\
-         access-control-allow-origin: *\r\n\
-         access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
-         access-control-allow-headers: *\r\n\
-         connection: close\r\n\
-         \r\n"
-    );
-    let _ = wr.write_all(head.as_bytes()).await;
+/// `416 Range Not Satisfiable` (RFC 7233 §4.4): empty body, and
+/// `content-range` advertises the actual size so the client can recompute
+/// a valid range.
+pub fn unsatisfiable_range_response(file_size: u64) -> Response {
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header("content-length", 0)
+        .header("content-range", format!("bytes */{file_size}"));
+    builder = streaming_common_headers(builder);
+    builder = with_cors(builder);
+    builder.body(Body::empty()).expect("static response")
 }
 
-/// Stream `length` bytes from `path` starting at `offset`, in 64 KB
-/// chunks. The header must already have been written by the caller.
-/// Errors after the header is sent are silently dropped — the
-/// `connection: close` framing means the client will see a truncated
-/// body and retry.
-async fn stream_file<W: AsyncWrite + Unpin>(
-    wr: &mut W,
-    path: &std::path::Path,
+/// Raw byte range for BLE transport. Content-Type is
+/// `application/octet-stream` (matches plain-app), with no
+/// Content-Disposition and no Range negotiation — the caller has already
+/// validated `offset` / `length`.
+async fn range_raw_response(path: &Path, offset: u64, length: u64) -> Response {
+    let reader = match open_seeking_reader(path, offset, length).await {
+        Ok(r) => r,
+        Err(_) => return respond(404, Vec::new(), "text/plain"),
+    };
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("content-length", length);
+    builder = with_cors(builder);
+    builder
+        .body(Body::from_stream(AsyncReadStream::new(reader)))
+        .expect("static response")
+}
+
+/// Open `path`, seek to `offset`, and cap the reader at `length` bytes.
+/// The file's existence was already verified by the metadata check in
+/// [`serve_file`]; an open failure here is a race and answers 404.
+async fn open_seeking_reader(
+    path: &Path,
     offset: u64,
     length: u64,
-) {
-    let mut file = match tokio::fs::File::open(path).await {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    if offset > 0 && file.seek(SeekFrom::Start(offset)).await.is_err() {
-        return;
+) -> std::io::Result<tokio::io::Take<tokio::fs::File>> {
+    let mut file = tokio::fs::File::open(path).await?;
+    if offset > 0 {
+        file.seek(SeekFrom::Start(offset)).await?;
     }
-    let mut remaining = length as usize;
-    let mut buf = vec![0u8; 64 * 1024];
-    while remaining > 0 {
-        let to_read = remaining.min(buf.len());
-        let n = match file.read(&mut buf[..to_read]).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if wr.write_all(&buf[..n]).await.is_err() {
-            break;
-        }
-        remaining -= n;
+    Ok(file.take(length))
+}
+
+fn with_cors(builder: axum::http::response::Builder) -> axum::http::response::Builder {
+    let mut builder = builder;
+    for (k, v) in cors_header_pairs() {
+        builder = builder.header(
+            HeaderName::from_bytes(k.as_bytes()).expect("valid cors name"),
+            HeaderValue::from_str(v).expect("valid cors value"),
+        );
     }
-    let _ = wr.flush().await;
+    builder
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("plain-file-server-test-{name}"))
-    }
-
-    #[tokio::test]
-    async fn unsatisfiable_range_responds_416_with_content_range() {
-        let path = temp_path("416");
-        tokio::fs::write(&path, b"0123456789").await.unwrap();
-        let mut out = Vec::new();
-        serve_unsatisfiable_range(&mut out, 10).await;
-        let head = String::from_utf8(out).unwrap();
-        assert!(head.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"));
-        assert!(head.contains("content-length: 0\r\n"));
-        assert!(head.contains("content-range: bytes */10\r\n"));
-        assert!(head.contains("accept-ranges: bytes\r\n"));
-        assert!(head.ends_with("\r\n\r\n"));
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-
-    #[tokio::test]
-    async fn partial_range_serves_206_with_requested_bytes() {
-        let path = temp_path("206");
-        tokio::fs::write(&path, b"0123456789").await.unwrap();
-        let mut out = Vec::new();
-        serve_partial(&mut out, &path, 2, 4, 10, "video/mp4", "inline").await;
-        let raw = String::from_utf8(out).unwrap();
-        assert!(raw.starts_with("HTTP/1.1 206 Partial Content\r\n"));
-        assert!(raw.contains("content-length: 3\r\n"));
-        assert!(raw.contains("content-range: bytes 2-4/10\r\n"));
-        assert!(raw.ends_with("234"));
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-}
+#[path = "../../../tests/unit/local_api/server/file_server.rs"]
+mod tests;

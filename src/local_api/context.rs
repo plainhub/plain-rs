@@ -65,6 +65,9 @@ pub struct AppCtx {
     /// User library (audio queue/playlists/history, tags, favorite
     /// folders) — plain-rs `library` core over local_library.db.
     pub library: Arc<crate::local_api::db::LibraryDb>,
+    /// The unified preferences store (`<data_dir>/prefs.json`) — the
+    /// single in-process writer; resolvers read/write through it.
+    pub prefs: Arc<crate::prefs::Prefs>,
     pub identity: Arc<AppIdentity>,
     pub peer_status: PeerStatusManager,
     pub discover_manager: NearbyDiscoverManager,
@@ -85,35 +88,14 @@ pub struct AppCtx {
     pub shell: Arc<dyn ShellHooks>,
 }
 
-/// Host-shell integration seam: everything the local API stack needs
-/// from its host app. plain-desktop implements this over
-/// tauri_plugin_store + AppHandle; other hosts provide their own.
+/// Host-shell integration seam: UI-only hooks the local API stack needs
+/// from its host. All persisted state goes through [`AppCtx::prefs`]
+/// instead — the shell no longer proxies preferences.
 pub trait ShellHooks: Send + Sync {
-    /// Current device display name (used as fallback before the
-    /// updateDeviceName mutation has run).
-    fn device_name(&self) -> String;
-    /// Persist and apply a new device display name.
-    fn set_device_name(&self, name: &str);
-    /// Persist and apply a new mDNS hostname label.
-    fn set_mdns_hostname(&self, hostname: &str);
     /// Notify the UI shell (desktop: Tauri webview event, payload JSON).
     fn notify(&self, event: &str, payload: String);
     /// App version reported by deviceInfo (desktop: package_info).
     fn app_version(&self) -> String {
         String::new()
     }
-    /// The persisted DLNA sender list under `key`
-    /// (`dlna_allowed_senders` / `dlna_denied_senders`), entries encoded
-    /// `ip|name`.
-    fn dlna_senders(&self, _key: &str) -> Vec<String> {
-        Vec::new()
-    }
-    /// Whether the DLNA receiver is enabled in host preferences.
-    fn dlna_enabled(&self) -> bool {
-        false
-    }
-    /// Append a sender to the persisted DLNA sender list under `key`.
-    fn dlna_add_sender(&self, key: &str, ip: &str, name: &str);
-    /// Remove a sender (by ip) from the persisted DLNA sender list.
-    fn dlna_remove_sender(&self, key: &str, ip: &str);
 }

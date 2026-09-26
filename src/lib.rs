@@ -6,6 +6,8 @@ pub mod library;
 #[cfg(feature = "local_api")]
 pub mod local_api;
 pub mod mdns;
+#[cfg(feature = "prefs")]
+pub mod prefs;
 #[cfg(feature = "sqlite_browse")]
 pub mod sqlite_browse;
 pub mod tls;

@@ -17,7 +17,8 @@ mod context;
 mod schema;
 
 use std::sync::Arc;
-use tokio::io::AsyncWrite;
+
+use axum::response::Response;
 
 use crate::chat::peer_auth;
 use crate::local_api::context::AppCtx;
@@ -27,23 +28,18 @@ use crate::xchacha_encrypt_raw;
 pub use context::PeerCtx;
 pub use schema::{PeerSchema, build_schema};
 
-/// Handle a fully-parsed `POST /peer_graphql` request.
+/// Handle a `POST /peer_graphql` request.
 ///
-/// The caller is responsible for HTTP framing (parsing the request line,
-/// headers, and body). This function takes the encrypted body and the
-/// `c-id` / `c-cid` headers, runs the auth chain, executes the GraphQL
-/// payload through the typed peer schema, and writes the encrypted
-/// response back to `wr`.
-pub async fn handle<W>(
-    wr: &mut W,
+/// Takes the encrypted body and the `c-id` / `c-cid` headers, runs the
+/// auth chain, executes the GraphQL payload through the typed peer
+/// schema, and returns the encrypted response.
+pub async fn handle(
     body: &[u8],
     header_client_id: &str,
     header_channel_id: &str,
     ctx: &Arc<AppCtx>,
     peer_schema: &Arc<PeerSchema>,
-) where
-    W: AsyncWrite + Unpin,
-{
+) -> Response {
     log::info!("[/peer_graphql] request from c-id={header_client_id}");
 
     // ── 1. Authenticate ──────────────────────────────────────────────────
@@ -58,8 +54,7 @@ pub async fn handle<W>(
         Err(e) => {
             log::warn!("[/peer_graphql] auth failed: {}", e.reason());
             let msg = e.reason();
-            respond(wr, 401, "Unauthorized", msg.as_bytes(), "text/plain").await;
-            return;
+            return respond(401, msg.as_bytes().to_vec(), "text/plain");
         }
     };
 
@@ -97,11 +92,7 @@ pub async fn handle<W>(
     // ── 3. Encrypt and respond ───────────────────────────────────────────
     let response_text = response_json.to_string();
     match xchacha_encrypt_raw(&authed.key, response_text.as_bytes()) {
-        Some(encrypted) => {
-            respond(wr, 200, "OK", &encrypted, "application/octet-stream").await;
-        }
-        None => {
-            respond(wr, 500, "Internal Server Error", b"", "text/plain").await;
-        }
+        Some(encrypted) => respond(200, encrypted, "application/octet-stream"),
+        None => respond(500, Vec::new(), "text/plain"),
     }
 }

@@ -105,7 +105,7 @@ impl DlnaEngine {
     /// `DlnaRendererState.acceptCastRequest`: dispatches SetUri (and a queued
     /// Play), clears pending state, and optionally persists the sender as
     /// allowed so future requests are auto-accepted.
-    pub async fn accept_cast(&self, remember: bool, shell: &dyn crate::local_api::ShellHooks) {
+    pub async fn accept_cast(&self, remember: bool, prefs: &crate::prefs::Prefs) {
         let s = self.state.read().await;
         let Some(pending) = s.pending_cast_request.clone() else {
             return;
@@ -114,8 +114,9 @@ impl DlnaEngine {
         drop(s);
         self.dispatch_accept(&pending, play_queued);
         if remember && !pending.sender_ip.is_empty() {
-            shell.dlna_remove_sender("dlna_denied_senders", &pending.sender_ip);
-            shell.dlna_add_sender(
+            crate::prefs::dlna::remove_sender(prefs, "dlna_denied_senders", &pending.sender_ip);
+            crate::prefs::dlna::add_sender(
+                prefs,
                 "dlna_allowed_senders",
                 &pending.sender_ip,
                 &pending.sender_name,
@@ -126,7 +127,7 @@ impl DlnaEngine {
     /// Reject the current pending cast request. Mirrors plain-app's
     /// `DlnaRendererState.rejectCastRequest`: clears pending state and
     /// optionally persists the sender as denied.
-    pub async fn reject_cast(&self, remember: bool, shell: &dyn crate::local_api::ShellHooks) {
+    pub async fn reject_cast(&self, remember: bool, prefs: &crate::prefs::Prefs) {
         let s = self.state.read().await;
         let Some(pending) = s.pending_cast_request.clone() else {
             return;
@@ -137,8 +138,9 @@ impl DlnaEngine {
         s.pending_play_queued = false;
         drop(s);
         if remember && !pending.sender_ip.is_empty() {
-            shell.dlna_remove_sender("dlna_allowed_senders", &pending.sender_ip);
-            shell.dlna_add_sender(
+            crate::prefs::dlna::remove_sender(prefs, "dlna_allowed_senders", &pending.sender_ip);
+            crate::prefs::dlna::add_sender(
+                prefs,
                 "dlna_denied_senders",
                 &pending.sender_ip,
                 &pending.sender_name,

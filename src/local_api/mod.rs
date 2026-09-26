@@ -24,31 +24,6 @@ pub mod tls;
 
 pub use context::ShellHooks;
 
-use crate::{base64_encode, ed25519_generate, short_uuid};
-
-/// Persistent device identity loaded from the host's preferences store.
-#[derive(Clone, Debug)]
-pub struct AppIdentity {
-    pub client_id: String,
-    pub device_name: String,
-    /// Base64-encoded Ed25519 keypair bytes (64 bytes: private || public).
-    pub ed25519_keypair: String,
-}
-
-/// Default device name shown on first run (before the user renames):
-/// "Plain-<short uuid>".
-pub fn default_device_name() -> String {
-    format!("Plain-{}", short_uuid::short_uuid())
-}
-
-/// Build a fresh device identity (first run). The host persists the three
-/// fields under the keys `client_id` / `device_name` /
-/// `signature_key_pair`.
-pub fn generate_identity() -> AppIdentity {
-    let (kp, _) = ed25519_generate();
-    AppIdentity {
-        client_id: short_uuid::short_uuid(),
-        device_name: default_device_name(),
-        ed25519_keypair: base64_encode(&kp),
-    }
-}
+// Identity lives with the preferences engine (`prefs::identity`); keep
+// the historical `local_api::` paths working for the host shells.
+pub use crate::prefs::identity::{AppIdentity, default_device_name, generate_identity};

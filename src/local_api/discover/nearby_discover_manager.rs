@@ -240,8 +240,8 @@ impl NearbyDiscoverManager {
     /// Persists and applies a new mDNS hostname — mirrors plain-app's
     /// `MdnsHostnamePreference` + `WebAddressBar` save path, applied
     /// immediately by re-publishing on the shared responder socket.
-    pub fn set_mdns_hostname(&self, shell: &dyn crate::local_api::ShellHooks, hostname: &str) {
-        shell.set_mdns_hostname(hostname);
+    pub fn set_mdns_hostname(&self, prefs: &crate::prefs::Prefs, hostname: &str) {
+        let _ = prefs.set("mdns_hostname", hostname);
         *self.mdns_hostname.write().unwrap() = hostname.to_string();
         self.publish_service();
         // Drop instances cached under the previous hostname and re-browse so

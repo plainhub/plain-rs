@@ -25,25 +25,31 @@ library = ["dep:rusqlite"]
 # PRAGMA column metadata, delete/insert rows. Shared by plain-nas
 # (chat.db + library.db) and plain-desktop (local db) devtools surfaces.
 sqlite_browse = ["dep:rusqlite", "dep:serde_json"]
+# Unified preferences storage (`<data_dir>/prefs.json`, flat string→JSON
+# map): the single engine + first-run identity/url-token/mDNS-hostname
+# bootstrap + DLNA sender-list helpers shared by plain-nas and the
+# plain-desktop Tauri shells (replaces per-app copies and
+# tauri-plugin-store).
+prefs = ["dep:serde_json"]
 # The desktop app's embedded local API stack, extracted from
 # plain-desktop's src-tauri/local/* so the Tauri crate stays a thin
-# shell: async-graphql schema + executor, hand-rolled HTTP/WS/TLS
-# server, chat wiring, peer status, nearby discovery, DLNA receiver,
-# downloads, link previews. plain-nas does NOT enable this (it runs the
-# full axum server).
+# shell: async-graphql schema + executor, axum HTTP/WS router, chat
+# wiring, peer status, nearby discovery, DLNA receiver, downloads, link
+# previews. plain-nas does NOT enable this (it builds its own axum
+# router over the shared chat/library cores).
 local_api = [
     "chat",
     "library",
+    "prefs",
     "sqlite_browse",
     "dep:async-graphql",
+    "dep:axum",
     "dep:native-tls",
     "dep:serde_json",
     "dep:futures-util",
     "dep:reqwest",
     "dep:regex",
-    "dep:rustls-pemfile",
     "dep:sysinfo",
-    "dep:tokio-rustls",
     "dep:tokio-tungstenite",
     "tokio/net",
     "tokio/rt",
@@ -83,12 +89,15 @@ futures-core = "0.3"
 # local_api feature: async/IO plumbing for the embedded local server.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 async-graphql = { version = "7", default-features = false, optional = true }
+# Same axum stack plain-nas pins, so both servers share one framework.
+axum = { version = "0.7", default-features = false, features = ["ws", "multipart", "tokio", "http1"], optional = true }
+# Client-side TLS for the peer-status WS connector (peer_status_manager);
+# the server side is axum + the host's axum-server rustls listener.
 native-tls = { version = "0.2", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"], optional = true }
+# "stream" enables bytes_stream() for /proxyfs response forwarding.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "stream"], optional = true }
 regex = { version = "1", optional = true }
-rustls-pemfile = { version = "2", optional = true }
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk"], optional = true }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"], optional = true }
 # AsyncReadStream needs the AsyncRead trait + ReadBuf (io-util is the
 # minimal feature set that provides them; no runtime/net).
